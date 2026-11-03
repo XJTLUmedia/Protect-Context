@@ -629,6 +629,7 @@ instead of leaving stale numbers in this README.
 | MCP tool missing in host | Server not started with the venv interpreter | Point `command` at `.venv/bin/python` and pass `-m protect_context.mcp_server` |
 | Extension does not load | Node older than 22.19 or pi not restarted | Check `pi list`, then restart; use `pi -ne` to start without extensions |
 | Contract edit rejected over MCP | Removing a frozen seed constraint | Seeds are protected; use the CLI or a pi slash command as the owner |
+| Published, but `pi.dev/packages` says "No packages match" | The gallery index is built from npm search, and npm drops search documents whose `downloads.monthly` is `0`. A publish rewrites that document with the download figure of that moment, so publishing before npm's first download rollup pins it at `0` | Run `scripts/check-discoverability.sh`; if the document's downloads are `0` while the downloads API reports traffic, publish once the rollup exists (npm re-crawls documents on its own as well, typically within a week) |
 
 ## Limitations and security boundary
 
