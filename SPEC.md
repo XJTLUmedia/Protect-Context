@@ -1,6 +1,6 @@
 # SPEC — protect-context · Agent Guardrail Suite
 
-**Version:** 1.0 · **Status:** FROZEN 2026-08-28 · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
+**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
 
 ## 0. Mission & principles
 
@@ -21,7 +21,7 @@ Principles: advisory-first (nudge before block); block only for repeated identic
 | 3 | Editing too much / scope creep | Session diff tracking vs baseline (files/lines via git); warn thresholds; widget shows Δ; contract seed bans unrelated refactors | ext + core |
 | 4 | Misunderstanding repo before acting | `guard_start`/orientation brief: repo tree, languages, conventions files (CLAUDE.md/AGENTS.md/README), injected at session start | ext + core |
 | 5 | Plausible-but-subtly-wrong code | `guard_contract_check` deterministic checklist over a change summary; verify gate; test-required contract seed | ext + core |
-| 6 | Losing earlier context/constraints | Persistent journal (`.agent-guard/journal.jsonl`, decisions/notes); re-injected on change; survives restarts | ext + core |
+| 6 | Losing earlier context/constraints | Persistent journal (`.agent-guard/journal.jsonl`, decisions/notes); owner task anchor; trusted entries re-injected on change and after every compaction (including mid-run threshold/overflow); model notes re-injected as explicitly unverified; `guard_journal` reads the full text; survives restarts | ext + core |
 | 7 | Repeated corrections of same behavior | Corrections journal entries with tags, re-injected like contract; `guard_note type=correction` | ext + core |
 | 8 | Large diffs → review burden | Diff gates: warn 400 lines / 10 files, hard 800 lines (notify + widget + status verdict, split advice) | ext + core |
 | 9 | Repetitive debugging loops | Command fingerprint streaks; identical failing bash blocked on 3rd attempt with change-strategy reason | ext + core |
@@ -42,7 +42,8 @@ Principles: advisory-first (nudge before block); block only for repeated identic
                        "sessions":{"<id>":{"started","git_head","brief_digest",
                                            "notify_watermarks":{"ctx_pct","diff_lines","diff_files"},
                                            "updated"}},
-                       "counters":{}}
+                       "counters":{},
+                       "task":{"text","source":"prompt|owner","ts"}}   # optional
 ```
 
 - `cmd` is stored for bash rows on both sides of a call: the fingerprint-normalized
@@ -151,19 +152,22 @@ Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi impor
 Event behaviors (all thresholds from config):
 
 - `session_start`: ensure store; new session id; record git HEAD (null if no repo); load config/contract/journal; render widget.
-- `before_agent_start`: build compact brief (contract ≤12 lines, 3 most-recent corrections, open loops ≤2, last evidence) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}` and save digest.
+- `before_agent_start`: build compact brief (`task:` line, contract ≤12 lines, 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified model notes, open loops ≤2, last evidence, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
+- `context`: only while a mid-run re-injection is pending (armed by `session_compact`) — if the conversation holds no persisted `guard-brief` message, append `{role:"custom", customType:"guard-brief", content, display:false}` to `event.messages`. The result is per-request, so it is re-applied on each request until a persisted block is seen; with no pending flag the handler is an O(1) no-op.
+- `input`: capture the first substantive owner prompt (≥20 chars, not a slash command) as `state.task` (source `prompt`) and invalidate the brief digest, so `task:` is re-injected on that same turn. `/guard-task` writes source `owner` and always wins; short follow-ups ("continue") never replace a task.
 - `tool_call` (bash only): (a) risk patterns → `ctx.hasUI && risk_confirm` → single `ctx.ui.confirm("Risky command", …)`; no-UI → log only, never block; a declined confirm appends `tool_call` (`cmd`, `ok=false`); (b) loop check: prior failed attempts for fingerprint ≥ `loop_block_after - 1` → append `tool_call` (`cmd`, `ok=false`) and return `{block:true, reason:"guard: '<cmd>' already failed N times this session — do not re-run unchanged; change approach or read the error. (Raise loop_block_after in .agent-guard/config.json to override.)"}`; (c) else append `tool_call` event with `cmd`.
 - `tool_execution_start`: record start time by toolCallId (map, pruned on end).
 - `tool_execution_end`: append `tool_result` event (`ok=!isError`, ms, out_chars=sum of text content lengths; bash adds cmd fingerprint + exit); update widget.
 - `turn_end`: `ctx.getContextUsage()` → notify once per 10% watermark ≥ `ctx_warn_pct` (suggest /compact); `git diff --shortstat HEAD` → threshold notifies (warn/hard, once per level); update widget.
+- `session_compact`: invalidate `brief_digest` and `counters.orient_sha1` (the next turn re-injects even unchanged text) and arm the `context` re-assertion, because a threshold/overflow compaction resumes the run via `AgentStart`, where `before_agent_start` never fires.
 - `session_shutdown`: persist state.json.
 - Widget (single line): `PC Δ+123L/4f 1loop ev2 ctx41%`.
 
 Risk patterns (deny-confirm list): `rm -rf /`, `rm -rf ~`, `git push --force` (not `--force-with-lease`), `git reset --hard`, `mkfs`, `dd of=/dev/`, `chmod -R 777 /`, `curl|…| bash/sh`, `sudo rm`.
 
-Commands: `/guard-status`, `/guard-contract add|remove|list [text]`, `/guard-verify <cmd>`, `/guard-note <type> <text>`, `/guard-report` (full session summary, printed).
+Commands: `/guard-status`, `/guard-contract add|remove|list [text]`, `/guard-verify <cmd>`, `/guard-note <type> <text>`, `/guard-task [<text>|--clear]` (show/replace/clear the owner task anchor), `/guard-report` (full session summary, printed).
 
-Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_contract_check` (deterministic checklist: for each constraint, mark addressed/unclear from the supplied summary text — heuristic keyword coverage, no LLM), `guard_status`.
+Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_contract_check` (deterministic checklist: for each constraint, mark addressed/unclear from the supplied summary text — heuristic keyword coverage, no LLM), `guard_status` (includes journal totals so the read path is discoverable).
 
 Constraints: **no background processes/sockets/timers from the factory** (defer to `session_start`); idempotent `session_shutdown` cleanup; guard every `ctx.ui.*` with `ctx.hasUI`; never throw from event handlers (catch → `ctx.ui.notify`).
 

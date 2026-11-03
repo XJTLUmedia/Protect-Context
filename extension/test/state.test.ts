@@ -86,3 +86,37 @@ test("state: save prunes old sessions but never the current one", () => {
     assert.ok(!("s-1" in saved.sessions), "the oldest non-current session is dropped");
   });
 });
+
+test("state: owner task survives concurrent sessions and rewrites", () => {
+  withCwd((cwd) => {
+    const state = defaultState("session-task", null);
+    state.task = { text: "Ship the audit fixes", source: "owner", ts: "2026-11-03T00:00:00Z" };
+    sessionState(state, "session-task").brief_digest = "digest";
+    saveState(cwd, state);
+
+    // Another session (or a Python CLI write) must not erase the project task.
+    const reloaded = loadState(cwd)!;
+    assert.deepEqual(reloaded.task, { text: "Ship the audit fixes", source: "owner", ts: "2026-11-03T00:00:00Z" });
+    sessionState(reloaded, "session-other");
+    saveState(cwd, reloaded);
+    assert.equal(loadState(cwd)!.task?.text, "Ship the audit fixes");
+  });
+});
+
+test("state: malformed task records are dropped, not rendered", () => {
+  withCwd((cwd) => {
+    mkdirSync(join(cwd, ".agent-guard"), { recursive: true });
+    writeFileSync(
+      statePath(cwd),
+      JSON.stringify({ current_session: { id: "s", started: "", git_head: null }, sessions: {}, counters: {}, task: { text: 7 } }),
+      "utf8",
+    );
+    assert.equal(loadState(cwd)!.task, undefined);
+    writeFileSync(
+      statePath(cwd),
+      JSON.stringify({ current_session: { id: "s", started: "", git_head: null }, sessions: {}, counters: {}, task: "nope" }),
+      "utf8",
+    );
+    assert.equal(loadState(cwd)!.task, undefined);
+  });
+});

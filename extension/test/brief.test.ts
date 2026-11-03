@@ -168,3 +168,66 @@ test("brief: newest owner constraints outrank seeds and agent entries never disp
   assert.deepEqual(selected.slice(2).map((c) => c.id), DEFAULT_CONTRACT.constraints.slice(0, 10).map((c) => c.id));
   assert.equal(selected.some((c) => c.source === "agent"), false);
 });
+
+test("brief: owner task anchors the top of the brief and is bounded", () => {
+  const brief = buildBrief({
+    task: "Implement the compaction audit fixes",
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.equal(brief.split("\n")[0], "task: Implement the compaction audit fixes");
+  const long = buildBrief({
+    task: "x".repeat(500),
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  const taskLine = long.split("\n")[0]!;
+  assert.equal(Array.from(taskLine).length, "task: ".length + 200);
+  assert.ok(taskLine.endsWith("…"), "an overlong task is marked, not silently cut");
+  const none = buildBrief({ task: "", contract: DEFAULT_CONTRACT.constraints, corrections: [], loops: [], lastEvidence: null });
+  assert.doesNotMatch(none, /^task:/m);
+});
+
+test("brief: agent notes are explicitly unverified and shorter than trusted entries", () => {
+  const agentNotes = Array.from({ length: 4 }, (_, i) => ({
+    type: "decision",
+    text: `model note ${i} ${"y".repeat(200)}`,
+    tags: ["agent"],
+  }));
+  const brief = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    agentNotes,
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.match(brief, /\nagent notes \(unverified\):\n/);
+  const noteLines = brief.split("\n").filter((line) => line.startsWith("- model note"));
+  assert.equal(noteLines.length, 2, "only the newest two notes are shown");
+  assert.ok(noteLines.every((line) => line.includes("…")), "notes are truncated to the shorter cap");
+  assert.match(brief, /\+2 more journal entries — guard_journal reads them/);
+});
+
+test("brief: trusted journal text is never silently cut", () => {
+  const long = `reasoning ${"z".repeat(260)}`;
+  const brief = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    decisions: [{ type: "decision", text: long, tags: [] }],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.match(brief, /^journal text truncated — guard_journal shows the full entry$/m);
+  const short = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    decisions: [{ type: "decision", text: "short decision", tags: [] }],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.doesNotMatch(short, /guard_journal/);
+});

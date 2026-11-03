@@ -30,6 +30,10 @@ export interface StatusData {
   diffWarnLines: number;
   diffHardLines: number;
   diffWarnFiles: number;
+  /** Journal size (optional: only populated where the view can read it). */
+  journalCount?: number;
+  /** Subset of journalCount tagged `agent` (model-written, never trusted). */
+  agentNoteCount?: number;
 }
 
 /** Two compact lines + Nudge. */
@@ -51,6 +55,10 @@ export function buildStatus(d: StatusData): string {
     lines.push(
       `diff scan: lower bound (${d.diffSkippedFiles ?? 0} skipped, ${d.diffTruncatedFiles ?? 0} truncated)`,
     );
+  }
+  if ((d.journalCount ?? 0) > 0) {
+    // Make the read path discoverable: journal entries are not all re-injected.
+    lines.push(`journal: ${d.journalCount} entries (${d.agentNoteCount ?? 0} agent) — guard_journal reads them`);
   }
   if (d.lastVerify) {
     lines.push(`last verify: ${formatVerifyLine(d.lastVerify)}`);

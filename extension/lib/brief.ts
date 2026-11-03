@@ -13,11 +13,17 @@ export function sha1Hex(s: string): string {
 }
 
 export interface BriefInput {
+  /** Owner-stated task captured for this project (SPEC §1 #6): the request that
+   *  a compaction summary is most likely to have paraphrased away. */
+  task?: string | null;
   contract: Constraint[];
   /** Most recent trusted decisions, newest first (already sliced). */
   decisions?: Array<{ type: string; text: string; tags: string[] }>;
   /** Most recent corrections, newest first (already sliced). */
   corrections: Array<{ type: string; text: string; tags: string[] }>;
+  /** Most recent model-written entries, newest first. Shown as explicitly
+   *  unverified: they are the agent's own notes, never owner authority. */
+  agentNotes?: Array<{ type: string; text: string; tags: string[] }>;
   loops: LoopInfo[];
   lastEvidence: { id: string; exit: number; cmd: string; ms: number | null } | null;
 }
@@ -25,7 +31,12 @@ export interface BriefInput {
 export const BRIEF_MAX_CONTRACT_LINES = 12;
 export const BRIEF_MAX_DECISIONS = 3;
 export const BRIEF_MAX_CORRECTIONS = 3;
+export const BRIEF_MAX_AGENT_NOTES = 2;
 export const BRIEF_MAX_LOOPS = 2;
+/** Owner task display cap (chars). */
+export const TASK_DISPLAY_MAX = 200;
+/** Agent-note display cap (chars) — shorter than a trusted entry on purpose. */
+export const AGENT_NOTE_DISPLAY_MAX = 120;
 /** Command display cap (chars) — matches Python's cmd[:60] discipline. */
 export const CMD_DISPLAY_MAX = 60;
 
@@ -68,26 +79,43 @@ export function selectBriefConstraints(contract: Constraint[]): Constraint[] {
     .map(({ constraint }) => constraint);
 }
 
+interface SectionInfo {
+  hidden: number;
+  truncated: boolean;
+}
+
+/** Render one journal section within its cap and report what the cap dropped,
+ *  so the brief can point at the read path instead of silently truncating. */
 function appendJournalSection(
   lines: string[],
-  heading: "decisions:" | "corrections:",
+  heading: "decisions:" | "corrections:" | "agent notes (unverified):",
   entries: Array<{ text: string; tags: string[] }>,
   cap: number,
-): void {
-  if (entries.length === 0) return;
+  textMax = 200,
+): SectionInfo {
+  if (entries.length === 0) return { hidden: 0, truncated: false };
   lines.push(heading);
+  let truncated = false;
   for (const entry of entries.slice(0, cap)) {
+    const full = normalizeOneLine(entry.text, 10_000);
+    const shown = trunc(full, textMax);
+    if (shown !== full) truncated = true;
     const safeTags = [...new Set((Array.isArray(entry.tags) ? entry.tags : []).map((tag) => truncLine(tag, 40)).filter(Boolean))]
       .slice(0, 8);
     const tags = safeTags.length > 0 ? ` [${safeTags.join(",")}]` : "";
-    lines.push(`- ${truncLine(entry.text)}${tags}`);
+    lines.push(`- ${shown}${tags}`);
   }
+  return { hidden: Math.max(0, entries.length - cap), truncated };
 }
 
-/** Build the compact brief: contract (≤12 lines), ≤3 trusted decisions,
- *  ≤3 trusted corrections, ≤2 loops, and last evidence. */
+/** Build the compact brief: owner task, contract (≤12 lines), ≤3 trusted
+ *  decisions, ≤3 trusted corrections, ≤2 unverified agent notes, ≤2 loops, and
+ *  last evidence. Anything a cap dropped is announced with the read path. */
 export function buildBrief(input: BriefInput): string {
   const lines: string[] = [];
+
+  const task = truncLine(input.task ?? "", TASK_DISPLAY_MAX);
+  if (task !== "") lines.push(`task: ${task}`);
 
   const contractLines = selectBriefConstraints(input.contract);
   if (contractLines.length > 0) {
@@ -107,9 +135,19 @@ export function buildBrief(input: BriefInput): string {
     }
   }
 
-  appendJournalSection(lines, "decisions:", input.decisions ?? [], BRIEF_MAX_DECISIONS);
-  appendJournalSection(lines, "corrections:", input.corrections, BRIEF_MAX_CORRECTIONS);
-
+  const sections = [
+    appendJournalSection(lines, "decisions:", input.decisions ?? [], BRIEF_MAX_DECISIONS),
+    appendJournalSection(lines, "corrections:", input.corrections, BRIEF_MAX_CORRECTIONS),
+    appendJournalSection(
+      lines,
+      "agent notes (unverified):",
+      input.agentNotes ?? [],
+      BRIEF_MAX_AGENT_NOTES,
+      AGENT_NOTE_DISPLAY_MAX,
+    ),
+  ];
+  const hiddenEntries = sections.reduce((sum, info) => sum + info.hidden, 0);
+  const truncatedEntries = sections.some((info) => info.truncated);
   if (input.loops.length > 0) {
     lines.push("loops:");
     for (const l of input.loops.slice(0, BRIEF_MAX_LOOPS)) {
@@ -122,6 +160,15 @@ export function buildBrief(input: BriefInput): string {
     lines.push(
       `last verify: ${truncLine(input.lastEvidence.id, 40)} exit=${input.lastEvidence.exit} '${truncLine(input.lastEvidence.cmd, CMD_DISPLAY_MAX)}'${ms}`,
     );
+  }
+
+  // The caps above keep the brief constant-cost; these two lines keep the loss
+  // recoverable instead of silent (goal #6/#12).
+  if (hiddenEntries > 0) {
+    lines.push(`+${hiddenEntries} more journal entries — guard_journal reads them`);
+  }
+  if (truncatedEntries) {
+    lines.push("journal text truncated — guard_journal shows the full entry");
   }
 
   return lines.join("\n");

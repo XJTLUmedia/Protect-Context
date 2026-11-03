@@ -83,7 +83,7 @@ without turning the agent into a different agent.
 
 | Primitive | What it gives you | Where you meet it |
 |---|---|---|
-| **Brief** | Contract, recent trusted decisions and corrections, open loops, and the last evidence ID, injected before the agent starts a turn | Automatic in pi; `orientation`, `status`, `guard_journal` elsewhere |
+| **Brief** | Owner task, contract, recent trusted decisions and corrections, a short unverified section for the agent's own notes, open loops, and the last evidence ID — injected before a turn and re-asserted mid-run after a compaction | Automatic in pi; `orientation`, `status`, `guard_journal` elsewhere |
 | **Orientation** | Bounded repo digest: tree, languages, and conventions files (`CLAUDE.md`, `AGENTS.md`, `CONVENTIONS.md`, `README.md`, `README`) | Injected once per digest in pi; `orientation` in CLI/MCP |
 | **Evidence ledger** | Every verification run recorded as `ev-NNNN` with exit code, duration, command, and a bounded output digest | `guard_verify`, `protect-context verify`, `guard_evidence` |
 | **Loop brake** | Identical failing commands are fingerprinted; the Nth attempt is blocked instead of re-run | Hard block in pi and the CLI; reported through MCP |
@@ -284,8 +284,10 @@ PC Δ+88L/6f 0loop ev5 ctx8%
 | Verification evidence (`ev-NNNN`) | `guard_verify`, `/guard-verify` | `guard_verify` | `verify` |
 | Loop blocking | blocks the command | `guard_loop_check` reports and advises | `verify` refuses; `loops` exits 1 |
 | Scope audit | session-start baseline + warnings | `guard_diff_audit` (explicit baseline) | `diff --baseline REF` |
-| Journal write/read | `guard_note`, `/guard-note` | `guard_note`, `guard_journal` | `note`, `journal` |
-| Trusted re-injection of decisions | yes, after change or compaction | read views only | read views only |
+| Journal write/read | `guard_note`, `/guard-note`, `guard_journal` | `guard_note`, `guard_journal` | `note`, `journal` |
+| Trusted re-injection of decisions | yes, after change and after every compaction (incl. mid-run) | read views only | read views only |
+| Re-injection of the agent's own notes | yes, in an explicitly unverified section | read views only | read views only |
+| Owner task anchor | `/guard-task`, auto-captured from the first prompt | — | — |
 | Contract management | `/guard-contract` | `guard_contract` | `contract list\|add\|remove` |
 | Risky-command confirmation | one grouped confirm | host approval policy | — |
 | Status widget | yes | — | `status` |
@@ -302,6 +304,7 @@ Slash commands:
 | `/guard-contract` | `list` · `add <text>` · `remove <id>` — edit the persistent contract |
 | `/guard-verify` | Run a command through the evidence ledger |
 | `/guard-note` | Journal a `decision` · `correction` · `risk` · `note` |
+| `/guard-task` | Show · set `<text>` · `--clear` the owner task anchor that the brief re-injects |
 | `/guard-report` | Full session summary for handoff or review |
 
 Model-callable tools:
@@ -310,8 +313,9 @@ Model-callable tools:
 |---|---|---|
 | `guard_verify` | `command`, `timeout_s` (default 180, clamped 1–900) | Records `ev-NNNN`; refusal on a blocked loop |
 | `guard_note` | `type`, `text`, optional `tags` | Forced to the `agent` trust level |
+| `guard_journal` | `limit` (0–20, default 5), optional `type` | Read-only; recovers decisions, corrections, and the agent's own earlier notes after a compaction |
 | `guard_contract_check` | `summary` | Deterministic keyword coverage checklist, never a proof |
-| `guard_status` | — | Same data that feeds the widget |
+| `guard_status` | — | Same data that feeds the widget, including journal totals |
 
 ### MCP tools
 
@@ -497,7 +501,7 @@ when owner rows are malformed, preserving the original file for repair.
 | 3 | Editing too much / scope creep | Git diff audit over tracked, staged, and bounded non-ignored untracked work; safe explicit baselines | Warn/advisory |
 | 4 | Misunderstanding the repo | Worktree-root-aware bounded orientation digest in pi, CLI, and MCP; conventions-file discovery | Automatic context + explicit read |
 | 5 | Plausible but subtly wrong code | Deterministic contract checklist, verification gate, test-required seed | Heuristic/advisory |
-| 6 | Losing earlier context | Persistent journal; recent trusted decisions re-injected after change and compaction; CLI/MCP read views | Automatic context + explicit read |
+| 6 | Losing earlier context | Persistent journal; owner task anchor; recent trusted decisions re-injected after change and after every compaction (including mid-run threshold/overflow); agent notes re-injected as unverified; `guard_journal` read views | Automatic context + explicit read |
 | 7 | Repeating corrected behavior | Bounded tagged corrections; trusted corrections re-injected; model-authored entries retained for owner review | Automatic context + trust boundary |
 | 8 | Large diffs | Configurable line/file warning and hard-level notifications, status verdict, widget | Warn/advisory |
 | 9 | Repetitive debugging loops | Shared bash/evidence streak reconstruction; third identical failing command blocked by default in pi, CLI, and MCP | Hard block at configured threshold |
@@ -571,9 +575,13 @@ its count treated as a lower bound — the widget renders it as `Δ≥`.
 ### Trust and provenance
 
 Direct CLI and pi slash-command contract writes are treated as owner input.
-MCP/model journal writes are forcibly tagged `agent`: they stay inspectable
-through journal views but are not re-injected as trusted decisions or
-corrections. CLI and pi slash-command journal entries are trusted. Untagged
+MCP/model journal writes are forcibly tagged `agent`: they never enter the
+trusted `decisions:`/`corrections:` sections. They are not discarded either —
+the brief shows the newest two under `agent notes (unverified):`, clearly
+labelled and capped shorter than trusted text, and `guard_journal` returns the
+full stored entry. That keeps the model's own reasoning recoverable after a
+compaction without granting it authority. CLI and pi slash-command journal
+entries are trusted. Untagged
 legacy entries are treated as trusted for backward compatibility, because the
 frozen journal schema has no dedicated author field.
 
@@ -625,6 +633,9 @@ instead of leaving stale numbers in this README.
 | `Δ?` in the widget | Not a Git worktree, so no diff baseline | Run inside a repository, or use the CLI with an explicit `--baseline` |
 | `Δ≥` in the widget | Bounded untracked scan hit a cap | Treat the count as a lower bound; narrow the scan or review scope manually |
 | Loop never blocks | Commands differ (paths, flags) so fingerprints differ | Compare with `loops` / `guard_loop_check`; fingerprints intentionally ignore whitespace only |
+| Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes, 120 chars each | Read the full entry with `guard_journal` |
+| No guard block after an automatic compaction | Host emits no `context` event, so mid-run re-assertion cannot run | It returns at the next user prompt; check the host supports the `context` hook |
+| `task:` line is wrong or missing | Auto-capture ignores short prompts and slash commands, and an owner task always wins | Set it explicitly with `/guard-task <text>` or `/guard-task --clear` |
 | `PC_SESSION_ID` changes nothing in evidence | It scopes ledger *views*, not `state.json` | Expected: state is project-global by design |
 | MCP tool missing in host | Server not started with the venv interpreter | Point `command` at `.venv/bin/python` and pass `-m protect_context.mcp_server` |
 | Extension does not load | Node older than 22.19 or pi not restarted | Check `pi list`, then restart; use `pi -ne` to start without extensions |
@@ -662,14 +673,34 @@ instead of leaving stale numbers in this README.
 
 #### Determinism
 
-- The frozen brief carries at most 12 constraints. Overflow is visible, and
-  owner constraints are prioritized, but hidden constraints are not enforced by
-  context injection.
+- The frozen brief carries at most 12 constraints, 3 trusted decisions, 3
+  trusted corrections, and 2 agent notes. Overflow is visible (each section
+  announces what it hid) and points at `guard_journal`, but hidden entries are
+  not enforced by context injection.
 - Frozen fingerprint normalization collapses whitespace everywhere, including
   inside quoted shell strings. Semantically different commands can therefore
   share a loop fingerprint.
 - The deterministic contract checker is keyword coverage, not program analysis.
   Treat every `addressed` result as a review prompt, not proof.
+
+#### Compaction
+
+- Re-injection is only as good as the store. A constraint, decision, or task
+  that was never written down cannot be restored, and the brief is a bounded
+  pointer rather than a transcript; `guard_journal` returns the full entry.
+- A mid-run compaction (threshold or overflow recovery) resumes the turn
+  through `AgentStart`, where `before_agent_start` does not run. The extension
+  arms a `context` hook on `session_compact` and re-asserts the block on every
+  request until a persisted one is back in the conversation. On a host that
+  does not emit `context`, the block returns at the next user prompt instead.
+- Task capture stores the first substantive prompt (≤200 chars) in
+  `.agent-guard/state.json`. That is conversation content: it stays local and
+  gitignored, but review it before sharing a store, and clear it with
+  `/guard-task --clear`.
+- Agent notes are unverified context, never authority. A model that journals
+  "ignore the contract" is shown that sentence back under an explicitly
+  unverified heading; treat it as data, and keep owner constraints in the
+  contract where they are trusted.
 
 #### Store
 

@@ -46,12 +46,17 @@ import {
 } from "./lib/contract.ts";
 import {
   appendJournal,
+  boundedReadLimit,
+  countJournal,
   isJournalType,
   type JournalType,
   readJournal,
-  recentCorrections,
-  recentDecisions,
+  READ_LIMIT_DEFAULT,
+  recentAgentEntries,
+  recentJournal,
+  renderJournal,
   tagsWithRequired,
+  trustedEntries,
 } from "./lib/journal.ts";
 import { toolCallEvent, toolResultEvent, bashExitFromResult, type EventRecord } from "./lib/events.ts";
 import {
@@ -61,7 +66,14 @@ import {
   shouldBlockLoop,
   type LoopInfo,
 } from "./lib/loops.ts";
-import { buildBrief, sha1Hex, BRIEF_MAX_CONTRACT_LINES, CMD_DISPLAY_MAX, truncLine } from "./lib/brief.ts";
+import {
+  buildBrief,
+  sha1Hex,
+  BRIEF_MAX_CONTRACT_LINES,
+  CMD_DISPLAY_MAX,
+  TASK_DISPLAY_MAX,
+  truncLine,
+} from "./lib/brief.ts";
 import { parseNumstat, parseUntrackedPaths, scanUntrackedFiles } from "./lib/gitparse.ts";
 import { renderWidget } from "./lib/widget.ts";
 import { checkContractSummary, renderChecklist } from "./lib/contract_check.ts";
@@ -82,6 +94,9 @@ const WIDGET_ID = "protect-context";
 const BRIEF_CUSTOM_TYPE = "guard-brief";
 /** Upper clamp for guard_verify timeouts (keep in sync with verify.TIMEOUT_MAX_S). */
 const MAX_VERIFY_TIMEOUT_S = 900;
+/** A prompt shorter than this is a follow-up ("continue", "go on"), not a task
+ *  statement — capturing it would erase the real request. */
+const TASK_MIN_CAPTURE_CHARS = 20;
 
 export default function (pi: ExtensionAPI) {
   // Session-scoped state (rebuilt on every session_start; new extension
@@ -100,6 +115,13 @@ export default function (pi: ExtensionAPI) {
   const startTimes = new Map<string, { start: number; tool: string; cmd: string | null }>();
   let lastDiff = { lines: 0, files: 0, available: false, lowerBound: false };
   let lastCtxPct: number | null = null;
+  // Mid-run re-injection (SPEC §5): a threshold/overflow compaction retries the
+  // run via AgentStart, so before_agent_start never fires for it. session_compact
+  // arms this flag; the `context` handler (per LLM request) then re-asserts the
+  // guard block until a persisted one is seen again. Outside that window the
+  // handler is an O(1) no-op; inside it the block is rebuilt per request, so a
+  // note written after the compaction is included.
+  let pendingReinject = false;
 
   // In-memory guardrail state (goal #12: O(1) hot paths — the event handlers
   // and widget never re-parse the JSONL files; disk reads happen once per
@@ -138,8 +160,10 @@ export default function (pi: ExtensionAPI) {
 
   // --- helpers ---------------------------------------------------------
 
-  /** Run an event/command body without ever throwing (SPEC §5). */
-  async function attempt<T>(ctx: ExtensionContext, fn: () => Promise<T>): Promise<T | undefined> {
+  /** Run an event/command body without ever throwing (SPEC §5). Synchronous
+   *  bodies are accepted so a handler that only formats text does not need a
+   *  token `async` wrapper. */
+  async function attempt<T>(ctx: ExtensionContext, fn: () => Promise<T> | T): Promise<T | undefined> {
     try {
       return await fn();
     } catch (err) {
@@ -385,6 +409,7 @@ export default function (pi: ExtensionAPI) {
     const d = await gatherDiff(ctx);
     lastDiff = { files: d.files, lines: d.lines, available: d.available, lowerBound: d.scanLimited };
     const ev = sessionEvidence(ctx.cwd);
+    const journal = readJournal(ctx.cwd);
     return {
       session: session.id,
       gitHead: session.gitHead,
@@ -398,6 +423,10 @@ export default function (pi: ExtensionAPI) {
       loops: openLoopsFromMap(loopState, cfg.loop_block_after),
       evidenceCount: ev.count,
       contractCount: loadContract(ctx.cwd).constraints.length,
+      journalCount: journal.length,
+      agentNoteCount: journal.filter((entry) =>
+        (Array.isArray(entry.tags) ? entry.tags : []).includes("agent"),
+      ).length,
       lastVerify: ev.last,
       ctxPct: lastCtxPct,
       diffWarnLines: cfg.diff_warn_lines,
@@ -533,6 +562,7 @@ export default function (pi: ExtensionAPI) {
       // tree even if HEAD appears later, so commits cannot erase session diff.
       session.gitUnborn = repoRoot !== null && session.gitHead === null;
       // Warm the in-memory counters once per session (O(1) hot paths after this).
+      pendingReinject = false;
       rebuildLoopState(ctx.cwd);
       evidenceCount = sessionEvidence(ctx.cwd).count;
       try {
@@ -545,50 +575,133 @@ export default function (pi: ExtensionAPI) {
     }),
   );
 
-  pi.on("before_agent_start", async (_event, ctx) =>
-    attempt(ctx, async () => {
-      refreshLoopStateIfChanged(ctx.cwd);
-      const contract = loadContract(ctx.cwd);
-      const journal = readJournal(ctx.cwd);
-      const decisions = recentDecisions(journal, 3);
-      const corrections = recentCorrections(journal, 3);
-      // In-memory streaks are the merged view (bash events + guard_verify
-      // outcomes) — the disk events alone would miss verify streaks.
-      const loops = openLoopsFromMap(loopState, cfg.loop_block_after).slice(0, 2);
-      const last = sessionEvidence(ctx.cwd).last;
-      const brief = buildBrief({
-        contract: contract.constraints,
-        decisions,
-        corrections,
-        loops,
-        lastEvidence: last ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms } : null,
-      });
+  /** Orientation text, scanned lazily once per session (goal #4). */
+  function ensureOrientation(ctx: ExtensionContext): string | null {
+    if (orientationText === null) {
+      try {
+        orientationText = renderOrientation(scanOrientation(ctx.cwd));
+      } catch {
+        orientationText = null;
+      }
+    }
+    return orientationText;
+  }
+
+  /** Compose the brief from the store. Cold path: the digest gate decides
+   *  re-injection, so this runs only when the text changed or after a
+   *  compaction (goal #12). */
+  function composeBrief(ctx: ExtensionContext): string {
+    refreshLoopStateIfChanged(ctx.cwd);
+    const contract = loadContract(ctx.cwd);
+    const journal = readJournal(ctx.cwd);
+    // In-memory streaks are the merged view (bash events + guard_verify
+    // outcomes) — the disk events alone would miss verify streaks.
+    const loops = openLoopsFromMap(loopState, cfg.loop_block_after).slice(0, 2);
+    const last = sessionEvidence(ctx.cwd).last;
+    return buildBrief({
+      task: state.task?.text ?? null,
+      contract: contract.constraints,
+      // Full lists, not a pre-slice: buildBrief owns the display caps and
+      // reports exactly how many entries those caps hid.
+      decisions: trustedEntries(journal, "decision"),
+      corrections: trustedEntries(journal, "correction"),
+      agentNotes: recentAgentEntries(journal, journal.length),
+      loops,
+      lastEvidence: last ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms } : null,
+    });
+  }
+
+  /** Full guard block (orientation + brief), forced past the digest gate. Only a
+   *  compaction needs this: it removed the previously injected block. */
+  function composeGuardBlock(ctx: ExtensionContext): string {
+    const parts: string[] = [];
+    const orientation = ensureOrientation(ctx);
+    if (orientation !== null) parts.push(orientation);
+    const brief = composeBrief(ctx);
+    if (brief.trim() !== "") parts.push(brief);
+    return parts.join("\n\n");
+  }
+
+  pi.on("before_agent_start", (_event, ctx) =>
+    attempt(ctx, () => {
+      const brief = composeBrief(ctx);
       const digest = sha1Hex(brief);
       const briefDue = brief.trim() !== "" && (cfg.brief_mode !== "changed" || view.brief_digest !== digest);
 
-      // Orientation (goal #4): injected once per distinct digest, like the
-      // brief. Lazily re-scanned if session_start did not populate it.
-      if (orientationText === null) {
-        try {
-          orientationText = renderOrientation(scanOrientation(ctx.cwd));
-        } catch {
-          orientationText = null;
-        }
-      }
-      const orientDigest = orientationText === null ? null : sha1Hex(orientationText);
+      const orientation = ensureOrientation(ctx);
+      const orientDigest = orientation === null ? null : sha1Hex(orientation);
       const orientDue = orientDigest !== null && state.counters.orient_sha1 !== orientDigest;
 
       if (!briefDue && !orientDue) return undefined;
 
       const parts: string[] = [];
-      if (orientDue && orientationText !== null) parts.push(orientationText);
+      if (orientDue && orientation !== null) parts.push(orientation);
       if (briefDue) parts.push(brief);
       if (parts.length === 0) return undefined;
 
       if (orientDue && orientDigest !== null) state.counters.orient_sha1 = orientDigest;
       if (briefDue) view.brief_digest = digest;
+      // A persisted block now exists for this conversation, so the mid-run
+      // re-assertion below has nothing left to repair.
+      pendingReinject = false;
       saveState(ctx.cwd, state);
       return { message: { customType: BRIEF_CUSTOM_TYPE, content: parts.join("\n\n"), display: false } };
+    }),
+  );
+
+  // Mid-run compaction (threshold / overflow recovery) resumes the run through
+  // AgentStart, where before_agent_start never fires — so without this hook the
+  // hidden brief would stay gone until the next user prompt (SPEC §1 #6). The
+  // hook re-asserts the block on every request until a PERSISTED one is back in
+  // the conversation; the restored message itself is per-request, so it must be
+  // re-applied rather than remembered.
+  pi.on("context", (event, ctx) =>
+    attempt(ctx, () => {
+      if (!pendingReinject) return undefined;
+      const messages = Array.isArray(event.messages) ? event.messages : [];
+      const persisted = messages.some(
+        (message) => (message as { customType?: unknown } | null)?.customType === BRIEF_CUSTOM_TYPE,
+      );
+      if (persisted) {
+        pendingReinject = false;
+        return undefined;
+      }
+      const block = composeGuardBlock(ctx);
+      if (block.trim() === "") return undefined;
+      return {
+        messages: [
+          ...messages,
+          {
+            role: "custom",
+            customType: BRIEF_CUSTOM_TYPE,
+            content: block,
+            display: false,
+            timestamp: Date.now(),
+          },
+        ],
+      };
+    }),
+  );
+
+  // Task capture (SPEC §1 #6): the owner's actual request is what a compaction
+  // summary paraphrases away most often. The first substantive prompt becomes
+  // the project task; `/guard-task` can replace or clear it (owner text wins).
+  pi.on("input", (event, ctx) =>
+    attempt(ctx, () => {
+      // Extension-injected messages are not owner input, and `!` runs a shell
+      // command rather than stating a task.
+      if (event.source === "extension") return undefined;
+      const text = typeof event.text === "string" ? event.text.trim() : "";
+      if (text === "" || text.startsWith("/") || text.startsWith("!")) return undefined;
+      const captured = truncLine(text, TASK_DISPLAY_MAX);
+      if (captured === "" || Array.from(captured).length < TASK_MIN_CAPTURE_CHARS) return undefined;
+      const existing = state.task;
+      if (existing?.source === "owner" || existing?.text === captured) return undefined;
+      state.task = { text: captured, source: "prompt", ts: new Date().toISOString() };
+      // The brief changed: let this same turn re-inject it.
+      view.brief_digest = null;
+      saveState(ctx.cwd, state);
+      return undefined;
     }),
   );
 
@@ -812,11 +925,13 @@ export default function (pi: ExtensionAPI) {
 
   // Compaction removes the previously injected hidden brief from active
   // context. Invalidate both digests so the next turn re-injects constraints,
-  // trusted journal entries and orientation even when their text is unchanged.
+  // trusted journal entries, the task and orientation even when their text is
+  // unchanged, and arm the per-request re-assertion for a mid-run compaction.
   pi.on("session_compact", async (_event, ctx) =>
     attempt(ctx, async () => {
       view.brief_digest = null;
       delete state.counters.orient_sha1;
+      pendingReinject = true;
       saveState(ctx.cwd, state);
       return undefined;
     }),
@@ -966,6 +1081,54 @@ export default function (pi: ExtensionAPI) {
       }),
   });
 
+  // Task anchor (SPEC §1 #6): explicit owner control over the `task:` line that
+  // the brief re-injects, so a compaction summary cannot redefine the ask.
+  pi.registerCommand("guard-task", {
+    description: "protect-context: show | set <text> | --clear the owner task anchor",
+    handler: (args, ctx) =>
+      attempt(ctx, () => {
+        const trimmed = (args ?? "").trim();
+        let capped = false;
+        if (trimmed === "") {
+          const current = state.task;
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              current
+                ? `task (${current.source}): ${current.text}\nNudge: use /guard-task <text> to replace it, or /guard-task --clear.`
+                : "task: (none captured yet)\nNudge: it is captured from the first substantive prompt; /guard-task <text> sets it explicitly.",
+              "info",
+            );
+          }
+          return undefined;
+        }
+        if (trimmed === "--clear") {
+          state.task = undefined;
+        } else {
+          const text = truncLine(trimmed, TASK_DISPLAY_MAX);
+          if (text === "") {
+            if (ctx.hasUI) ctx.ui.notify("usage: /guard-task <text> | --clear", "warning");
+            return undefined;
+          }
+          state.task = { text, source: "owner", ts: new Date().toISOString() };
+          // Store and display share one cap: the brief can always show what was
+          // stored, and the owner is told when the input was cut.
+          capped = Array.from(trimmed).length > TASK_DISPLAY_MAX;
+        }
+        // The brief text changed: force the next prompt to re-inject it.
+        view.brief_digest = null;
+        saveState(ctx.cwd, state);
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            trimmed === "--clear"
+              ? "task cleared\nNudge: the brief no longer anchors the original request."
+              : `task recorded${capped ? ` (capped at ${TASK_DISPLAY_MAX} chars)` : ""}\nNudge: the brief re-injects it on your next prompt and after compaction.`,
+            "info",
+          );
+        }
+        return undefined;
+      }),
+  });
+
   pi.registerCommand("guard-report", {
     description: "protect-context: full session summary",
     handler: async (_args, ctx) =>
@@ -1018,11 +1181,13 @@ export default function (pi: ExtensionAPI) {
     label: "Guard Note",
     description:
       "Append a decision/correction/risk/note to the persistent journal (.agent-guard/journal.jsonl). " +
-      "Model-written entries are tagged agent and persisted for owner review; they are not trusted brief input. " +
-      "Only trusted slash-command/CLI decisions and corrections are re-injected.",
+      "Model-written entries are tagged agent and persisted for owner review; they are not trusted brief input, " +
+      "though the brief shows the newest few under an explicitly unverified heading. " +
+      "Only trusted slash-command/CLI decisions and corrections are re-injected as authority; read any entry back with guard_journal.",
     promptSnippet: "Record a durable decision or correction in the journal",
     promptGuidelines: [
       "Use guard_note to record durable decisions; when corrected, log a tagged correction with type=correction.",
+      "After a compaction, use guard_journal to re-read earlier decisions and your own notes.",
     ],
     parameters: Type.Object({
       // Enum as a plain string schema: providers that reject anyOf/const still
@@ -1054,6 +1219,38 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // Read path for the journal (SPEC §4 parity with the MCP tool of the same
+  // name). Without it, the agent's own notes would be write-only in pi: the
+  // brief excludes `agent` entries from trusted sections, and a compaction then
+  // leaves no route back to them (SPEC §1 #6).
+  pi.registerTool({
+    name: "guard_journal",
+    label: "Guard Journal",
+    description:
+      "Read recent journal entries (read-only): timestamp, type, text, tags. limit is clamped to 0-20; type filters " +
+      "decision|correction|risk|note. Entries tagged agent are model-written notes — unverified, never owner authority, " +
+      "but the durable record of earlier reasoning; read them to recover decisions and rejected approaches.",
+    promptSnippet: "Read recent journal entries",
+    promptGuidelines: [
+      "Use guard_journal to recover earlier decisions, corrections, and your own notes after a compaction.",
+    ],
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Integer({ description: "How many entries to read (0-20, default 5)" })),
+      type: Type.Optional(
+        Type.Unsafe<JournalType>({
+          type: "string",
+          enum: ["decision", "correction", "risk", "note"],
+        }),
+      ),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const journal = readJournal(ctx.cwd);
+      const type = params.type;
+      const limit = params.limit === undefined ? READ_LIMIT_DEFAULT : boundedReadLimit(params.limit);
+      const text = renderJournal(recentJournal(journal, limit, type), countJournal(journal, type), type);
+      return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
   pi.registerTool({
     name: "guard_contract_check",
     label: "Guard Contract Check",

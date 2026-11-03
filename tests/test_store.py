@@ -152,6 +152,30 @@ def test_state_roundtrip():
     assert "brief_digest" not in loaded, "no flat baseline is written any more"
 
 
+def test_state_keeps_the_extension_task_anchor():
+    """The pi extension stores its owner task anchor in state.json (SPEC §2).
+
+    Python never interprets it, but a CLI/MCP save must not silently delete a
+    key the extension depends on: load_state copies unknown top-level keys and
+    save_state writes the merged mapping back.
+    """
+    task = {"text": "Ship the audit fixes", "source": "owner", "ts": "2026-11-03T00:00:00Z"}
+    store.ensure()
+    store.write_json(
+        store.state_path(),
+        {
+            "current_session": {"id": "test-session", "started": "2026-11-03", "git_head": None},
+            "sessions": {},
+            "counters": {},
+            "task": task,
+        },
+    )
+    st = store.load_state()
+    assert st["task"] == task
+    store.save_state(st)
+    assert store.load_state()["task"] == task
+
+
 def test_fingerprint_trim_and_collapse_only():
     assert store.fingerprint("  ls   -la\n") == "ls -la"
     assert store.fingerprint("pytest\t-q   -x") == "pytest -q -x"

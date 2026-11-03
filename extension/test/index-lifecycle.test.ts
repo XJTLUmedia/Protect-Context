@@ -114,7 +114,12 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     assert.match(modelNote.description, /persisted for owner review/);
     assert.match(modelNote.description, /Only trusted slash-command\/CLI/);
     await modelNote.execute("n1", { type: "decision", text: "model-only decision", tags: ["architecture"] }, null, null, ctx);
-    assert.equal(await before({}, ctx), undefined, "agent-tagged decision cannot alter the injected brief");
+    // Agent entries may now re-enter the brief, but only as an explicitly
+    // unverified section: they never join the trusted decisions section.
+    const afterModelNote = (await before({}, ctx)) as any;
+    assert.match(afterModelNote.message.content, /agent notes \(unverified\):/);
+    assert.match(afterModelNote.message.content, /model-only decision/);
+    assert.doesNotMatch(afterModelNote.message.content, /decisions:\n- model-only decision/);
     await assert.rejects(
       modelNote.execute("n2", { type: "note", text: " \n ", tags: [] }, null, null, ctx),
       /must not be blank/,
@@ -125,7 +130,12 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     await slashNote.handler("decision owner-approved architecture", ctx);
     const afterOwnerNote = (await before({}, ctx)) as any;
     assert.match(afterOwnerNote.message.content, /owner-approved architecture/);
-    assert.doesNotMatch(afterOwnerNote.message.content, /model-only decision/);
+    assert.match(
+      afterOwnerNote.message.content,
+      /agent notes \(unverified\):[\s\S]*model-only decision/,
+      "the agent note stays in the unverified section, not the trusted one",
+    );
+    assert.doesNotMatch(afterOwnerNote.message.content, /decisions:\n- model-only decision/);
     const entries = readJournal(dir);
     assert.ok(entries[0]?.tags.includes("agent"), "model tool always records agent provenance");
     assert.deepEqual(entries[1]?.tags, [], "slash command remains trusted");

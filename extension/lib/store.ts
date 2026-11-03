@@ -508,6 +508,15 @@ export interface SessionState {
   updated?: string;
 }
 
+/** Owner-stated task for this project (SPEC §2). Captured from the first real
+ *  prompt of a session or set explicitly with `/guard-task`; re-injected at the
+ *  top of the brief so a compaction summary cannot silently redefine the ask. */
+export interface TaskCapture {
+  text: string;
+  source: "prompt" | "owner";
+  ts: string;
+}
+
 /** Baseline that belongs to ONE pi session. Concurrent sessions in one project
  *  keep separate entries so they cannot clobber each other (SPEC §2). */
 export interface GuardState {
@@ -516,6 +525,8 @@ export interface GuardState {
   /** Opaque passthrough on the Python side; the extension stores digests here
    *  (e.g. the orientation digest) alongside numeric counters. */
   counters: Record<string, number | string>;
+  /** Project-level task capture (absent = nothing captured yet). */
+  task?: TaskCapture;
 }
 
 /** How many per-session baselines to retain (newest first, current always). */
@@ -574,6 +585,19 @@ function readSession(raw: unknown): SessionState | null {
   };
 }
 
+/** Parse the optional task capture; malformed legacy values are dropped rather
+ *  than rendered into a brief. */
+function readTask(raw: unknown): TaskCapture | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.text !== "string") return undefined;
+  return {
+    text: value.text,
+    source: value.source === "owner" ? "owner" : "prompt",
+    ts: typeof value.ts === "string" ? value.ts : "",
+  };
+}
+
 export function loadState(cwd: string): GuardState | null {
   const raw = readJson<unknown>(statePath(cwd));
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -617,6 +641,7 @@ export function loadState(cwd: string): GuardState | null {
       counters[key] = candidate;
     }
   }
+  const task = readTask(value.task);
   return {
     current_session: {
       id: currentId,
@@ -625,6 +650,7 @@ export function loadState(cwd: string): GuardState | null {
     },
     sessions,
     counters,
+    ...(task === undefined ? {} : { task }),
   };
 }
 

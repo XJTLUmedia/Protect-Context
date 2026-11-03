@@ -6,9 +6,16 @@ import { join } from "node:path";
 
 import {
   appendJournal,
+  boundedReadLimit,
+  countJournal,
   readJournal,
+  READ_LIMIT_DEFAULT,
+  READ_LIMIT_MAX,
+  recentAgentEntries,
   recentCorrections,
   recentDecisions,
+  recentJournal,
+  renderJournal,
   sanitizeTags,
   tagsWithRequired,
   TAG_COUNT_CAP,
@@ -57,4 +64,53 @@ test("journal: trusted decision/correction selectors exclude agent-tagged entrie
   ];
   assert.deepEqual(recentDecisions(journal, 3).map((entry) => entry.text), ["owner new", "owner old"]);
   assert.deepEqual(recentCorrections(journal, 3).map((entry) => entry.text), ["owner correction"]);
+});
+
+test("journal: agent notes are readable, risk entries are not memory", () => {
+  const journal = [
+    { ts: "1", type: "decision" as const, text: "owner decision", tags: [] },
+    { ts: "2", type: "decision" as const, text: "model reasoning", tags: ["agent"] },
+    { ts: "3", type: "risk" as const, text: "risky command", tags: ["agent"] },
+    { ts: "4", type: "note" as const, text: "model note", tags: ["agent", "docs"] },
+  ];
+  assert.deepEqual(recentAgentEntries(journal, 5).map((entry) => entry.text), ["model note", "model reasoning"]);
+  assert.deepEqual(recentAgentEntries(journal, 1).map((entry) => entry.text), ["model note"]);
+  assert.deepEqual(recentAgentEntries(journal, 0), [], "no agent notes without a positive cap");
+});
+
+test("journal: read limit is bounded like the Python boundary", () => {
+  assert.equal(boundedReadLimit(undefined), READ_LIMIT_DEFAULT);
+  assert.equal(boundedReadLimit(500), READ_LIMIT_MAX);
+  assert.equal(boundedReadLimit(-3), 0);
+  assert.equal(boundedReadLimit(7.9), 7);
+  assert.equal(boundedReadLimit(Number.NaN), READ_LIMIT_DEFAULT);
+  const journal = Array.from({ length: 30 }, (_, i) => ({
+    ts: `t${i}`,
+    type: "note" as const,
+    text: `entry ${i}`,
+    tags: [],
+  }));
+  assert.equal(recentJournal(journal, 5).length, 5);
+  assert.equal(recentJournal(journal, 500).length, READ_LIMIT_MAX, "never returns more than the cap");
+  assert.deepEqual(recentJournal(journal, 0), []);
+  assert.equal(countJournal(journal, "decision"), 0);
+  assert.equal(countJournal(journal), 30);
+});
+
+test("journal: render is one line per entry with a Nudge tail", () => {
+  const dir = tmpStore();
+  try {
+    appendJournal(dir, { type: "decision", text: "keep parser untouched", tags: ["scope"] });
+    const journal = readJournal(dir);
+    const rendered = renderJournal(recentJournal(journal, 5), countJournal(journal));
+    const lines = rendered.split("\n");
+    assert.equal(lines.length, 3, "header + one entry + nudge");
+    assert.match(lines[0]!, /^PC journal · last 1 of 1$/);
+    assert.match(lines[1]!, /^.+ · decision · keep parser untouched \[scope\]$/);
+    assert.match(lines[2]!, /^Nudge: /);
+    const filtered = renderJournal(recentJournal(journal, 5, "correction"), countJournal(journal, "correction"), "correction");
+    assert.match(filtered.split("\n")[0]!, /^PC journal correction · last 0 of 0$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
