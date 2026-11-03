@@ -17,7 +17,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { isAbsolute, relative } from "node:path";
 
 import { DEFAULT_CONFIG, type GuardConfig } from "./lib/defaults.ts";
@@ -48,6 +47,7 @@ import {
 import {
   appendJournal,
   isJournalType,
+  type JournalType,
   readJournal,
   recentCorrections,
   recentDecisions,
@@ -1025,7 +1025,14 @@ export default function (pi: ExtensionAPI) {
       "Use guard_note to record durable decisions; when corrected, log a tagged correction with type=correction.",
     ],
     parameters: Type.Object({
-      type: StringEnum(["decision", "correction", "risk", "note"] as const),
+      // Enum as a plain string schema: providers that reject anyOf/const still
+      // get `{type:"string", enum:[...]}`, and the generic keeps params.type
+      // narrowed to JournalType (pi-ai's StringEnum is a pi-schema type, which
+      // typebox's Object inference degrades to `unknown`).
+      type: Type.Unsafe<JournalType>({
+        type: "string",
+        enum: ["decision", "correction", "risk", "note"],
+      }),
       text: Type.String({ description: "What happened / what was decided" }),
       tags: Type.Optional(Type.Array(Type.String({ description: "Optional tags" }))),
     }),
