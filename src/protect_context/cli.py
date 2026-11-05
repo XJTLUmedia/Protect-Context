@@ -205,6 +205,15 @@ def cmd_orientation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    # Same stdio server as `python -m protect_context.mcp_server`; this verb is
+    # what the registry package entry launches (`uvx protect-context mcp`).
+    from .mcp_server import main as serve
+
+    serve()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="protect_context",
@@ -274,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("orientation", help="bounded repo tree, languages, and conventions")
     sp.set_defaults(func=cmd_orientation)
+
+    sp = sub.add_parser("mcp", help="serve the MCP tools on stdio (terminal session)")
+    sp.set_defaults(func=cmd_mcp)
 
     return p
 

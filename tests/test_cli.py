@@ -266,3 +266,71 @@ def test_cli_module_entry_runs_the_cli(tmp_path):
     assert proc.returncode in (0, 1)
     assert "PC status" in proc.stdout
     assert proc.stdout.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def _speak_mcp(tmp_path, env_extra):
+    """Drive `python -m protect_context mcp` through initialize + tools/list.
+
+    Returns (returncode, stderr, initialize result, tools list). Responses are
+    read one per write because a real host keeps stdin open.
+    """
+    init = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "pytest", "version": "0"}},
+    }
+    follow_up = [
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "protect_context", "mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "PC_SESSION_ID": "test-session", **env_extra},
+    )
+    stdin, stdout, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
+    assert stdin is not None and stdout is not None and stderr_pipe is not None
+    try:
+        stdin.write(json.dumps(init) + "\n")
+        stdin.flush()
+        hello = json.loads(stdout.readline())
+        stdin.write("".join(json.dumps(r) + "\n" for r in follow_up))
+        stdin.flush()
+        listed = json.loads(stdout.readline())
+    finally:
+        stdin.close()
+        stderr = stderr_pipe.read()
+        stderr_pipe.close()
+        proc.wait(timeout=60)
+    return proc.returncode, stderr, hello, listed
+
+
+def test_mcp_verb_serves_mcp_on_stdio(tmp_path):
+    """`protect-context mcp` is the launch command the MCP registry entry
+    declares (`uvx protect-context mcp`), so it must speak MCP on stdio."""
+    rc, stderr, hello, listed = _speak_mcp(tmp_path, {})
+    assert rc == 0, stderr
+    assert hello["result"]["serverInfo"]["name"] == "protect-context"
+    assert "guard_status" in {t["name"] for t in listed["result"]["tools"]}
+
+
+def test_mcp_verb_starts_even_when_proxy_env_is_broken(tmp_path):
+    """fastmcp's start banner probes PyPI for a newer version and only catches
+    httpx.HTTPError, so a SOCKS proxy without `socksio` aborts the server before
+    the first frame. The server must never depend on network health to serve
+    stdio (regression: `uvx protect-context mcp` died behind such a proxy)."""
+    socks = "socks5://127.0.0.1:9"
+    rc, stderr, hello, listed = _speak_mcp(tmp_path, {
+        # cold version-check cache: the fetch would run if the banner ran
+        "FASTMCP_HOME": str(tmp_path / "fastmcp-home"),
+        "ALL_PROXY": socks, "all_proxy": socks,
+        "HTTP_PROXY": socks, "http_proxy": socks,
+        "HTTPS_PROXY": socks, "https_proxy": socks,
+    })
+    assert rc == 0, stderr
+    assert hello["result"]["serverInfo"]["name"] == "protect-context"
+    assert "guard_status" in {t["name"] for t in listed["result"]["tools"]}

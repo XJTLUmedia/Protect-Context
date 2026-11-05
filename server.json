@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.XJTLUmedia/protect-context",
+  "title": "protect-context",
+  "description": "Agent guardrails: contract, evidence ledger, loop brake, diff-scope warnings, durable journal.",
+  "repository": {
+    "url": "https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent",
+    "source": "github"
+  },
+  "version": "2.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "protect-context",
+      "version": "2.0.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

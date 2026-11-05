@@ -6,6 +6,8 @@
 front of it — then makes scope creep, unverified claims, and repeated failures
 visible *before* they cost you a session.
 
+<!-- mcp-name: io.github.XJTLUmedia/protect-context -->
+
 <p align="center">
   <a href="./LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
   <a href="https://pi.dev/packages"><img alt="pi-package" src="https://img.shields.io/badge/pi--package-gallery-8a2be2"></a>
@@ -167,8 +169,9 @@ For pi with `pi-mcp-adapter`, add `.mcp.json` at the project root:
 }
 ```
 
-The same stdio shape works in any generic MCP host. Set `PC_SESSION_ID` when
-several host sessions need distinct evidence and loop views:
+The same stdio shape works in any generic MCP host. No checkout is needed
+either: `uvx protect-context mcp` runs the same server straight from PyPI. Set
+`PC_SESSION_ID` when several host sessions need distinct evidence and loop views:
 
 ```json
 {
@@ -196,6 +199,7 @@ pip install protect-context      # or: pipx install protect-context
 protect-context init             # seed .agent-guard/ in the current project
 protect-context status
 protect-context verify "pytest -q"
+protect-context mcp               # serve the MCP tools on stdio
 ```
 
 The CLI and MCP server are distributed through PyPI; the npm package ships only
@@ -353,6 +357,7 @@ protect-context loops
 protect-context diff [--baseline REF]
 protect-context preflight
 protect-context budget
+protect-context mcp
 ```
 
 ### Configuration

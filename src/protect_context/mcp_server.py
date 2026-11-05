@@ -200,7 +200,10 @@ def guard_orientation() -> str:
 
 
 def main() -> None:
-    mcp.run()  # stdio transport (default)
+    # stdio transport (default). No banner: it probes PyPI for a newer fastmcp
+    # on start, and an MCP server must not depend on network/proxy health to
+    # serve stdio (a SOCKS proxy without socksio aborts before the first frame).
+    mcp.run(show_banner=False)
 
 
 if __name__ == "__main__":
