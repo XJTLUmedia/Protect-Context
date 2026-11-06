@@ -10,13 +10,19 @@ module reports the same arithmetic.
 guard_verify outcomes are merged into the streaks too (ok=False → +1,
 ok=True → reset): the suite's own evidence tool must not be an escape hatch
 from goal #9. verify_runs.jsonl already stores `cmd`, so no §2 change.
+
+Streak identity is the frozen fingerprint plus a comparison key: a trailing
+``;`` outside quotes is ignored (``pytest -q`` and ``pytest -q;`` share a
+streak), and a trailing failure mask is stripped (``npm test || true`` is the
+same streak as ``npm test``). A success that only masks failure does not
+reset that streak. Stored commands are not rewritten.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from . import store
+from . import store, verify
 
 
 def _timestamp_key(value: object, position: int) -> tuple:
@@ -86,13 +92,16 @@ def streaks(events: list[dict] | None = None, session: str | None = None) -> lis
         cmd = e.get("cmd")
         if not isinstance(cmd, str) or not cmd:
             continue
-        cmd = store.fingerprint(cmd)  # defensive: storage should be normalized
+        # loop_key keeps the frozen fingerprint and also folds a trailing `;`.
+        cmd = verify.loop_key(cmd)
+        if not cmd:
+            continue
         ok = e.get("ok")
         if ok is False:
             current[cmd] = current.get(cmd, 0) + 1
-        elif ok is True:
+        elif ok is True and not verify.failure_masked(e.get("cmd") or ""):
             current.pop(cmd, None)
-        # ok None (unknown) → ignored, streak untouched
+        # ok None (unknown), or a masked exit 0, leaves the streak untouched
     out = [{"cmd": cmd, "count": n} for cmd, n in current.items() if n > 0]
     out.sort(key=lambda s: (-s["count"], s["cmd"]))
     return out
@@ -110,7 +119,7 @@ def would_block(streak_list: list[dict], cfg: dict) -> list[dict]:
 
 def command_block(command: str, cfg: dict, streak_list: list[dict] | None = None) -> dict | None:
     """Return the matching at-threshold streak, if this command must block."""
-    fp = store.fingerprint(command)
+    fp = verify.loop_key(command)
     if not fp:
         return None
     streak_list = streaks() if streak_list is None else streak_list

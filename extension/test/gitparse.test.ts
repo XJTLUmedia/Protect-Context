@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -89,6 +89,20 @@ test("untracked scan: counts bounded text lines and does not treat binary conten
     assert.equal(scan.binaryFiles, 1);
     assert.equal(scan.skippedFiles, 1);
     assert.equal(scan.scanLimited, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("untracked scan: POSIX treats a Windows-git backslash as a separator", () => {
+  if (process.platform === "win32") return;
+  const dir = mkdtempSync(join(tmpdir(), "pc-untracked-"));
+  try {
+    mkdirSync(join(dir, "sub"));
+    writeFileSync(join(dir, "sub", "nested.txt"), "a\nb\n", "utf8");
+    const scan = scanUntrackedFiles(dir, ["sub\\nested.txt"], 800);
+    assert.equal(scan.lines, 2);
+    assert.equal(scan.skippedFiles, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

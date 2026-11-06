@@ -247,11 +247,16 @@ Nudge: verify changes with guard_verify and cite the evidence id before claiming
 Record proof instead of asserting it:
 
 ```console
-$ protect-context verify "npm run check"
-PC evidence ev-0005 · exit 0 · 1440ms
-…output digest…
-Nudge: cite evidence ids, not memory, when claiming success.
+$ protect-context verify --timeout 180 npm run check
+PC verify ev-0005 · exit 0 · ok · 1440ms
+cwd: /path/to/project
+cmd: npm run check
+digest: …
+Nudge: cite this evidence id when claiming success.
 ```
+
+A pipeline or `|| true` is still recorded with the shell's real exit code, but
+the report says `UNTRUSTED` and the CLI exits 1. That exit 0 is not proof.
 
 Re-run the same failing command a third time and the brake engages:
 
@@ -350,7 +355,7 @@ verification, and `2` for an input/environment error.
 ```sh
 protect-context init
 protect-context status
-protect-context verify "pytest -q" [--timeout 180]
+protect-context verify [--timeout 180] pytest -q
 protect-context evidence [--limit 5]
 protect-context contract list
 protect-context contract add "Keep the public API stable" [--global]
@@ -589,14 +594,25 @@ are already gone and are not searched.
 
 `guard_verify` runs your command with the caller's privileges, spools output to
 temporary files to bound RAM, and records one append-only entry: ID, exit code,
-duration, command, and a digest of the output. IDs are allocated inside the
-shared lease, so parallel pi and CLI processes never collide.
+duration, command, and a digest of the output. Stdin is closed, so a command
+cannot read the MCP protocol stream or hang waiting for input. IDs are
+allocated inside the shared lease, so parallel pi and CLI processes never
+collide. If the ledger's last line was torn by a crash, the next append starts
+on its own line instead of gluing two JSON values together.
 
-Loop detection normalizes a command (whitespace collapsed, including inside
-quoted strings) into a fingerprint, then counts consecutive failures of that
-fingerprint across both bash and `guard_verify`. At `loop_block_after` the
-attempt is refused, with the prior failure count and a change-strategy nudge —
-the single cheapest intervention in the suite.
+The report is the part an agent should read. A failure includes the tail of
+the output, why that exit happened, and a concrete fix. Exit 0 is recorded
+honestly, but a pipeline (no `pipefail`) or a failure mask (`|| true`, `; :`)
+is labelled `UNTRUSTED` and must not be cited as proof. The CLI exits 1 for
+that case. ANSI color is stripped before the 2000-character digest cap so the
+tail stays readable.
+
+Loop detection still stores the frozen fingerprint (whitespace collapsed,
+nothing else). The streak key also ignores a trailing `;` outside quotes and a
+trailing failure mask, so `pytest -q;` and `npm test || true` count as the
+same command as `pytest -q` and `npm test`. A masked exit 0 does not reset the
+streak. At `loop_block_after` the attempt is refused, with the prior failure
+count and a change-strategy nudge.
 
 ![Verification workflow: run a command, persist its evidence, and cite the result. With the default threshold, two failures of the same normalized command block its third attempt; only that command succeeding resets its streak](./docs/images/evidence-loop.svg)
 
@@ -673,7 +689,9 @@ instead of leaving stale numbers in this README.
 | No brief appears in pi | Digest unchanged (`brief_mode: "changed"`) and nothing new to say | Expected on quiet turns; set `brief_mode: "always"` to see it every turn |
 | `Δ?` in the widget | Not a Git worktree, so no diff baseline | Run inside a repository, or use the CLI with an explicit `--baseline` |
 | `Δ≥` in the widget | Bounded untracked scan hit a cap | Treat the count as a lower bound; narrow the scan or review scope manually |
-| Loop never blocks | Commands differ (paths, flags) so fingerprints differ | Compare with `loops` / `guard_loop_check`; fingerprints intentionally ignore whitespace only |
+| Loop never blocks | Commands differ by flags or paths. A trailing semicolon or an or-true failure mask shares a streak; other edits do not | Compare with `loops` / `guard_loop_check`. Change the command for real — do not mask the failure |
+| Verify says UNTRUSTED, or CLI verify exits 1 after exit 0 | The shell status is only the last stage of a pipeline, or the command forces success with `true` | Re-run with `set -o pipefail` and without the mask. Do not cite that evidence id |
+| Verify timed out, or an MCP session stalled on an old build | The command waited on stdin, or it exceeded timeout_s (clamped to 1–900, recorded as exit 124) | Current builds close stdin. Fix the hang or pass a larger `timeout_s` |
 | Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes, 120 chars each | Read the full entry with `guard_journal`, or search tags and evidence with `guard_recall` |
 | No guard block after an automatic compaction | Host emits no `context` event, so mid-run re-assertion cannot run | It returns at the next user prompt; check the host supports the `context` hook |
 | `task:` line is wrong or missing | Auto-capture ignores short prompts and slash commands, and an owner task always wins | Set it explicitly with `/guard-task <text>` or `/guard-task --clear` |
@@ -699,7 +717,9 @@ instead of leaving stale numbers in this README.
 
 - An evidence record proves only that one command returned one exit code. It is
   not cryptographically bound to a commit/worktree, has no freshness policy, and
-  does not prove the claimed behavior.
+  does not prove the claimed behavior. Exit 0 from a pipeline or a failure mask
+  is labelled UNTRUSTED in the report for that reason. The stored `ok` field
+  stays the shell's real status.
 
 #### Scope
 

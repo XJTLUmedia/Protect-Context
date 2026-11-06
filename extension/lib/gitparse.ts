@@ -108,7 +108,10 @@ export function scanUntrackedFiles(root: string, paths: string[], hardLineBudget
       continue;
     }
 
-    const candidate = resolve(rootAbs, path);
+    // Windows git.exe on WSL emits backslashes. On POSIX those are not
+    // separators, so the file would be skipped and the diff under-counted.
+    const relPath = process.platform !== "win32" && path.includes("\\") ? path.replaceAll("\\", "/") : path;
+    const candidate = resolve(rootAbs, relPath);
     const rel = relative(rootAbs, candidate);
     if (rel === "" || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || rel === ".." || isAbsolute(rel)) {
       skippedFiles += 1;

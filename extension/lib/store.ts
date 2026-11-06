@@ -18,6 +18,10 @@ import {
   unlinkSync,
   rmSync,
   realpathSync,
+  openSync,
+  readSync,
+  writeSync,
+  closeSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { hostname, homedir } from "node:os";
@@ -355,9 +359,36 @@ export function withStoreLock<T>(dir: string, fn: () => T, options: StoreLockOpt
   }
 }
 
+/** If a crashed writer left a partial line, start the next record on its own
+ * line. Otherwise the next append glues two JSON values into one unreadable
+ * line and both are dropped. The torn tail stays and is skipped as malformed. */
+function isolateTornTail(file: string): void {
+  let size = 0;
+  try {
+    const st = statSync(file);
+    if (!st.isFile()) return;
+    size = st.size;
+  } catch {
+    return;
+  }
+  if (size <= 0) return;
+  const fd = openSync(file, "r+");
+  try {
+    const buf = Buffer.alloc(1);
+    const n = readSync(fd, buf, 0, 1, size - 1);
+    // offset, length, position — the third argument is not the file position.
+    if (n === 1 && buf[0] !== 0x0a) writeSync(fd, Buffer.from("\n"), 0, 1, size);
+  } catch {
+    // A tail we cannot repair must not crash the writer.
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Append one JSON record as a single O_APPEND line write. The caller must
  *  already hold the store lock (see withStoreLock). */
 export function appendJsonlLocked(file: string, record: unknown): void {
+  isolateTornTail(file);
   maybeRotateLedger(file);
   appendFileSync(file, `${JSON.stringify(record)}\n`, "utf8");
 }

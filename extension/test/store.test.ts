@@ -407,6 +407,29 @@ test("verify: evidence ids sequence per file", () => {
   }
 });
 
+test("store: a torn jsonl tail does not swallow the next record", () => {
+  const dir = tmpStore();
+  try {
+    const file = join(dir, "events.jsonl");
+    writeFileSync(file, '{"n":1}\n{"n":"torn"', "utf8");
+    appendJsonl(file, { n: 2 });
+    assert.deepEqual(
+      readJsonl<{ n: number }>(file).map((row) => row.n),
+      [1, 2],
+    );
+
+    const whole = join(dir, "whole.jsonl");
+    writeFileSync(whole, '{"n":1}', "utf8");
+    appendJsonl(whole, { n: 2 });
+    assert.deepEqual(
+      readJsonl<{ n: number }>(whole).map((row) => row.n),
+      [1, 2],
+    );
+  } finally {
+    removeTreeAfterChildren(dir);
+  }
+});
+
 test("verify: malformed ledger objects are ignored by the typed reader", () => {
   const dir = tmpStore();
   try {

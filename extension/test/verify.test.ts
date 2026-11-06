@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import {
   clampTimeoutS,
   digestOf,
+  failureMasked,
   formatVerifyLine,
+  loopKey,
   nextEvidenceId,
+  renderVerifyReport,
   TIMEOUT_DEFAULT_S,
   TIMEOUT_MAX_S,
   TIMEOUT_MIN_S,
@@ -47,6 +50,57 @@ test("verify: next evidence id allocates the sequential ev-NNNN", () => {
   assert.equal(nextEvidenceId([run("ev-0041")]), "ev-0042");
   // malformed ids are ignored, not crashing the allocation
   assert.equal(nextEvidenceId([run("junk"), run("ev-0007")]), "ev-0008");
+});
+
+test("verify: ansi sequences are stripped before the 2000-char cap", () => {
+  const colored = `\u001b[31m${"x".repeat(2500)}\u001b[0m`;
+  const digest = digestOf(colored, "");
+  assert.equal(digest.length, 2000);
+  assert.equal(digest.includes("\u001b"), false);
+});
+
+test("verify: failure masks and pipelines are visible, quoted ones are not", () => {
+  assert.equal(failureMasked("false || true"), true);
+  assert.equal(failureMasked("pytest -q; true"), true);
+  assert.equal(failureMasked("pytest -q; exit 0"), true);
+  assert.equal(loopKey("npm test; exit 0"), "npm test");
+  assert.equal(failureMasked('echo "|| true"'), false);
+  assert.equal(loopKey("pytest -q;"), "pytest -q");
+  assert.equal(loopKey("npm test || true"), "npm test");
+  assert.equal(loopKey('echo "|| true"'), 'echo "|| true"');
+  assert.equal(loopKey('echo ";"'), 'echo ";"');
+});
+
+test("verify: failure report says why and how to re-run; masked exit 0 is untrusted", () => {
+  const failed = renderVerifyReport({
+    id: "ev-0003",
+    ts: "",
+    session: "s",
+    cmd: "definitely-missing-binary-xyz",
+    exit: 127,
+    ok: false,
+    digest: "sh: definitely-missing-binary-xyz: not found",
+    ms: 4,
+  }, "/work/repo");
+  assert.match(failed, /FAIL/);
+  assert.match(failed, /cwd: \/work\/repo/);
+  assert.match(failed, /PATH/);
+  assert.match(failed, /^Nudge:/m);
+  assert.equal(failed.trimEnd().split("\n").at(-1)?.startsWith("Nudge:"), true);
+
+  const masked = renderVerifyReport({
+    id: "ev-0004",
+    ts: "",
+    session: "s",
+    cmd: "false | true",
+    exit: 0,
+    ok: true,
+    digest: "",
+    ms: 2,
+  });
+  assert.match(masked, /UNTRUSTED/);
+  assert.match(masked, /pipefail/);
+  assert.match(masked, /not evidence of success/);
 });
 
 test("verify: long commands are truncated in compact lines", () => {

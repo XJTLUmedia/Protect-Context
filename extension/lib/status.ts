@@ -5,7 +5,7 @@
 
 import type { LoopInfo } from "./loops.ts";
 import { CMD_DISPLAY_MAX, truncLine } from "./brief.ts";
-import { formatVerifyLine, type VerifyRun } from "./verify.ts";
+import { formatVerifyLine, outcomeLabel, type VerifyRun } from "./verify.ts";
 
 export interface StatusData {
   session: string;
@@ -93,6 +93,9 @@ function statusNudge(d: StatusData): string {
   }
   if (d.lastVerify === null) {
     return "run /guard-verify <cmd> to create evidence before claiming success.";
+  }
+  if (outcomeLabel(d.lastVerify) === "UNTRUSTED") {
+    return `last verify ${truncLine(d.lastVerify.id, 40)} exited 0 but is not trustworthy — re-run without a pipe or failure mask before claiming success.`;
   }
   return "verify before success claims; keep tool outputs bounded.";
 }

@@ -608,7 +608,31 @@ def _maybe_rotate(path: Path) -> None:
         _rotate_ledger(path)
 
 
+def _isolate_torn_tail(path: Path) -> None:
+    """Keep a crashed writer's partial line from gluing onto the next record.
+
+    ``splitlines`` still yields a fragment that has no trailing newline, so a
+    later append would concatenate two JSON values into one unreadable line
+    and drop both. A single newline isolates the torn tail (skipped as
+    malformed) and lets the new record parse.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= 0:
+        return
+    try:
+        with open(path, "rb+") as handle:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.write(b"\n")
+    except OSError:
+        return
+
+
 def _append_unlocked(path: Path, entry: dict) -> None:
+    _isolate_torn_tail(path)
     _maybe_rotate(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:

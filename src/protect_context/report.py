@@ -56,7 +56,7 @@ def status() -> tuple[str, int]:
         r = runs[0]
         lines.append(
             f"evidence {verify.count(session=sid)} · "
-            f"last {store.display_text(r['id'], 40)} exit {r['exit']}"
+            f"last {store.display_text(r['id'], 40)} exit {r['exit']} {verify.outcome_label(r)}"
         )
     else:
         lines.append(f"evidence {verify.count(session=sid)} · last none")
@@ -80,6 +80,11 @@ def status() -> tuple[str, int]:
         )
     elif warn:
         nudge = f"Nudge: diff ≥ {cfg['diff_warn_lines']} lines — split it before it grows."
+    elif runs and verify.outcome_label(runs[0]) == "UNTRUSTED":
+        nudge = (
+            "Nudge: the latest verify exited 0 but is not trustworthy — "
+            "re-run without a pipe or failure mask before citing it."
+        )
     else:
         nudge = "Nudge: verify changes with guard_verify and cite the evidence id before claiming success."
     lines.append(nudge)

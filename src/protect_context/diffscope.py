@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,60 @@ _READ_CHUNK = 64 * 1024
 
 class DiffError(RuntimeError):
     """git could not run or refused (e.g. not a repository)."""
+
+
+_WIN_DRIVE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
+_WSL_UNC = re.compile(r"^//wsl(?:\$|\.localhost)/[^/]+/(.*)$", re.IGNORECASE)
+
+
+def translate_windows_path(text: str) -> str | None:
+    """Map a Windows or WSL-UNC absolute path to a POSIX path, or None.
+
+    Windows git.exe on WSL prints ``C:\\repo`` or ``\\\\wsl$\\Distro\\home\\...``.
+    On POSIX, Path does not treat ``C:`` as absolute, so using that string as
+    the repository root looks up the wrong directory and under-counts the diff.
+    """
+    raw = text.strip().strip('"')
+    if not raw:
+        return None
+    drive = _WIN_DRIVE.match(raw)
+    if drive:
+        rest = drive.group(2).replace("\\", "/").strip("/")
+        prefix = f"/mnt/{drive.group(1).lower()}"
+        return f"{prefix}/{rest}" if rest else prefix
+    unc = _WSL_UNC.match(raw.replace("\\", "/"))
+    if unc:
+        rest = unc.group(1).strip("/")
+        return f"/{rest}" if rest else "/"
+    return None
+
+
+def resolve_git_root(raw: str) -> Path:
+    """Resolve ``git rev-parse --show-toplevel``, including WSL drive letters."""
+    text = raw.strip().strip('"')
+    if os.name != "nt":
+        translated = translate_windows_path(text)
+        if translated is not None:
+            candidate = Path(translated)
+            try:
+                if candidate.exists():
+                    return candidate.resolve()
+            except OSError:
+                pass
+    return Path(text).resolve()
+
+
+def normalize_repo_relpath(path: str) -> str:
+    """Prefer ``/`` in repo-relative git paths when the OS separator is ``/``.
+
+    A backslash from Windows git is a separator there and a literal character
+    on POSIX, so ``sub\\\\file.txt`` would miss ``sub/file.txt`` and the diff
+    line count would be short. Real filenames that contain a backslash are
+    rare; under-counting scope is the failure this avoids.
+    """
+    if os.sep == "/" and "\\" in path:
+        return path.replace("\\", "/")
+    return path
 
 
 def _git_bytes(args: list[str], *, stdin: bytes | None = None) -> bytes:
@@ -51,7 +106,7 @@ def _repo_root() -> Path:
     root = _git(["rev-parse", "--show-toplevel"]).strip()
     if not root:
         raise DiffError("not inside a git work tree")
-    return Path(root).resolve()
+    return resolve_git_root(root)
 
 
 def _empty_tree() -> str:
@@ -167,7 +222,7 @@ def _scan_untracked(root: Path, paths: list[str], hard_line_budget: int) -> dict
             skipped_files += 1
             continue
 
-        candidate = root / rel
+        candidate = root / normalize_repo_relpath(rel)
         try:
             # Git paths are root-relative, but defend against malformed output,
             # races, and symlinks that point outside the repository.
