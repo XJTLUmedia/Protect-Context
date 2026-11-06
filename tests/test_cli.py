@@ -146,6 +146,37 @@ def test_journal_reads_recent_entries_and_filters_type(capsys):
     assert "Use rg, not grep" not in out
 
 
+# ---- recall -----------------------------------------------------------------
+
+def test_recall_filters_keywords_tags_and_evidence_id(capsys):
+    journal.add("decision", "Prefer ripgrep for search", ["search"])
+    journal.add("note", "agent thought about embeddings", ["agent"])
+    verify.run_verify("true")
+
+    assert main(["recall", "ripgrep", "--tag", "search"]) == 0
+    out = capsys.readouterr().out
+    assert "trusted · decision" in out and "Prefer ripgrep" in out
+    assert "embeddings" not in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+    assert main(["recall", "--evidence-id", "ev-1", "--limit", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "ev-0001" in out and "trusted · evidence" in out
+    assert "ripgrep" not in out
+
+    assert main(["recall", "--evidence-id", "not-an-id"]) == 2
+    out = capsys.readouterr().out
+    assert "ev-NNNN" in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_recall_does_not_create_a_store(capsys):
+    assert main(["recall", "anything"]) == 0
+    out = capsys.readouterr().out
+    assert "0 hits" in out and out.rstrip().splitlines()[-1].startswith("Nudge:")
+    assert not store.guard_dir().exists()
+
+
 # ---- loops ------------------------------------------------------------------
 
 def test_loops_exit_1_at_block_threshold(write_events, capsys):

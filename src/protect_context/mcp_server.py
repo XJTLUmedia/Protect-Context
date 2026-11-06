@@ -26,6 +26,7 @@ from . import (
     loops,
     orientation,
     preflight,
+    recall,
     report,
     store,
     verify,
@@ -166,6 +167,43 @@ def guard_journal(limit: int = journal.READ_LIMIT_DEFAULT, type: str | None = No
         return journal.render_recent(entries, journal.count(type), type)
     except ValueError as e:
         return f"journal: {e}\nNudge: pass a valid type or omit the type filter."
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def guard_recall(
+    query: str = "",
+    type: str | None = None,
+    tags: list[str] | None = None,
+    limit: int = recall.LIMIT_DEFAULT,
+    evidence_id: str | None = None,
+    cmd: str | None = None,
+) -> str:
+    """Search the retained journal and evidence window. No embeddings.
+
+    Keywords are case-insensitive substrings of text, cmd, and digest; every
+    keyword must match (a keyword that is itself ev-NNNN also matches that
+    evidence id). tags are AND and case-insensitive; evidence rows have no
+    tags, so a tag filter excludes them. type is decision|correction|risk|note
+    |evidence. evidence_id is an exact ev-NNNN id (ev-7 and ev-0007 match).
+    cmd is a fingerprint or substring of a verify run. Hits are ranked by
+    match strength, then recency, and labelled trusted or agent. Read-only:
+    does not create the store. limit is clamped to 0–20 (default 5).
+    """
+    try:
+        result = recall.search(
+            query,
+            type=type,
+            tags=tags,
+            limit=limit,
+            evidence_id=evidence_id,
+            cmd=cmd,
+        )
+    except ValueError as e:
+        return (
+            f"PC recall · error: {store.display_text(e, 200)}\n"
+            "Nudge: pass a valid type, evidence id, or integer limit."
+        )
+    return recall.render(result)
 
 
 @mcp.tool(annotations=_LOCAL_INITIALIZING_READ)

@@ -18,6 +18,7 @@ from . import (
     loops,
     orientation,
     preflight,
+    recall,
     report,
     store,
     verify,
@@ -169,6 +170,31 @@ def cmd_journal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recall(args: argparse.Namespace) -> int:
+    try:
+        result = recall.search(
+            args.query or "",
+            type=args.type,
+            tags=_tags_and(args.tag),
+            limit=args.limit,
+            evidence_id=args.evidence_id,
+            cmd=args.cmd,
+        )
+    except ValueError as e:
+        print(f"PC recall · error: {store.display_text(e, 200)}")
+        print(NUDGE_ERROR)
+        return 2
+    print(recall.render(result))
+    return 0
+
+
+def _tags_and(raw_list: list[str] | None) -> list[str]:
+    found: list[str] = []
+    for raw in raw_list or []:
+        found.extend(_tags(raw))
+    return found
+
+
 def cmd_loops(args: argparse.Namespace) -> int:
     cfg = store.load_config()
     streak_list = loops.streaks()
@@ -267,6 +293,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=journal.READ_LIMIT_DEFAULT)
     sp.add_argument("--type", choices=list(store.JOURNAL_TYPES), default=None)
     sp.set_defaults(func=cmd_journal)
+
+    sp = sub.add_parser(
+        "recall",
+        help="search the retained journal and evidence window (no embeddings)",
+    )
+    sp.add_argument("query", nargs="?", default="", help="keywords (AND); case-insensitive substring")
+    sp.add_argument("--type", choices=list(recall.RECALL_TYPES), default=None)
+    sp.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="required tag (repeatable, AND). Commas inside one flag are also AND",
+    )
+    sp.add_argument("--limit", type=int, default=recall.LIMIT_DEFAULT)
+    sp.add_argument("--evidence-id", default=None, help="exact evidence id (ev-NNNN)")
+    sp.add_argument(
+        "--cmd",
+        default=None,
+        help="fingerprint or substring matched against verify-run commands",
+    )
+    sp.set_defaults(func=cmd_recall)
 
     sp = sub.add_parser("loops", help="failing-command streaks")
     sp.set_defaults(func=cmd_loops)
