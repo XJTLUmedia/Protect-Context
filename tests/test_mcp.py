@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "guard_contract",
     "guard_note",
     "guard_journal",
+    "guard_recall",
     "guard_loop_check",
     "guard_diff_audit",
     "guard_preflight",
@@ -28,6 +29,7 @@ EXPECTED_TOOLS = {
 READ_ONLY_TOOLS = {
     "guard_evidence",
     "guard_journal",
+    "guard_recall",
     "guard_budget",
     "guard_orientation",
 }
@@ -71,6 +73,8 @@ def test_all_tools_smoke():
                                "tags": ["search"]}))
             results["journal"] = _text(await client.call_tool(
                 "guard_journal", {"limit": 5, "type": "correction"}))
+            results["recall"] = _text(await client.call_tool(
+                "guard_recall", {"query": "rg", "tags": ["search"], "limit": 5}))
             results["loop_check"] = _text(await client.call_tool("guard_loop_check", {}))
             results["diff_audit"] = _text(
                 await client.call_tool("guard_diff_audit", {"baseline": None}))
@@ -114,6 +118,9 @@ def test_all_tools_smoke():
     assert json.loads(json.dumps(entries[-1]["tags"])) == ["search", "agent"]
     assert "use rg not grep" in res["journal"]
     assert "[search,agent]" in res["journal"]
+    assert "use rg not grep" in res["recall"]
+    assert "agent · correction" in res["recall"]
+    assert res["recall"].rstrip().splitlines()[-1].startswith("Nudge:")
     assert "PC orientation" in res["orientation"]
 
 
@@ -209,6 +216,32 @@ def test_guard_note_validation_and_guard_journal_bounds():
     assert entries[-1]["tags"].count("agent") == 1
     assert entries[-1]["tags"][-1] == "agent"
     assert len(entries[-1]["tags"]) <= journal.TAG_COUNT_CAP
+
+
+def test_guard_recall_bounds_and_validation():
+    from fastmcp import Client
+
+    from protect_context.mcp_server import mcp
+
+    async def run():
+        async with Client(mcp) as client:
+            for i in range(3):
+                await client.call_tool("guard_note", {
+                    "type": "decision", "text": f"recall row {i} ledger", "tags": ["ledger"],
+                })
+            window = _text(await client.call_tool(
+                "guard_recall", {"query": "ledger", "type": "decision", "limit": 1}))
+            bad_id = _text(await client.call_tool(
+                "guard_recall", {"evidence_id": "nope"}))
+            bad_type = _text(await client.call_tool(
+                "guard_recall", {"type": "invalid"}))
+            return window, bad_id, bad_type
+
+    window, bad_id, bad_type = asyncio.run(run())
+    assert "1 of 3 hits" in window
+    assert "recall row 2" in window and "recall row 0" not in window
+    assert "ev-NNNN" in bad_id and bad_id.rstrip().splitlines()[-1].startswith("Nudge:")
+    assert "unknown recall type" in bad_type and bad_type.rstrip().splitlines()[-1].startswith("Nudge:")
 
 
 def test_failed_guard_verify_feeds_loop_streak_at_mcp_boundary():

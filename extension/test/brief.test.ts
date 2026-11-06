@@ -4,9 +4,11 @@ import {
   buildBrief,
   sha1Hex,
   selectBriefConstraints,
+  selectTaskRecall,
   BRIEF_MAX_CORRECTIONS,
   BRIEF_MAX_DECISIONS,
   BRIEF_MAX_LOOPS,
+  BRIEF_MAX_RECALL,
 } from "../lib/brief.ts";
 import { DEFAULT_CONTRACT } from "../lib/defaults.ts";
 
@@ -230,4 +232,71 @@ test("brief: trusted journal text is never silently cut", () => {
     lastEvidence: null,
   });
   assert.doesNotMatch(short, /guard_journal/);
+  assert.doesNotMatch(short, /guard_recall/);
+});
+
+test("brief: hidden journal entries point at guard_recall", () => {
+  const brief = buildBrief({
+    contract: [],
+    decisions: [],
+    corrections: Array.from({ length: 5 }, (_, i) => ({
+      type: "correction",
+      text: `correction ${i}`,
+      tags: [],
+    })).reverse(),
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.match(
+    brief,
+    /\+2 more journal entries — guard_journal reads them; guard_recall searches the retained window/,
+  );
+});
+
+test("brief: task tag matches inject at most two trusted rows the caps hid", () => {
+  const decisions = [
+    { type: "decision", text: "newest unrelated", tags: ["other"] },
+    { type: "decision", text: "also unrelated", tags: ["misc"] },
+    { type: "decision", text: "third unrelated", tags: ["misc"] },
+    { type: "decision", text: "use ripgrep for search", tags: ["Search"] },
+    { type: "decision", text: "older ledger rule", tags: ["ledger"] },
+  ];
+  const notes = [
+    { type: "note", text: "trusted ledger note", tags: ["ledger"] },
+    { type: "note", text: "agent ledger note", tags: ["ledger", "agent"] },
+  ];
+  const brief = buildBrief({
+    task: "Repair the ledger window and the search path",
+    contract: [],
+    decisions,
+    corrections: [],
+    recallPool: [...notes, ...decisions.slice(3)],
+    loops: [],
+    lastEvidence: null,
+  });
+  const recallLines = brief.split("\n").filter((line) => line.startsWith("- ") && line.includes(":"));
+  const injected = brief.split("\n").filter((line) => line.startsWith("- note:") || line.startsWith("- decision:"));
+  assert.equal(injected.length, BRIEF_MAX_RECALL);
+  assert.match(brief, /recall:/);
+  assert.match(brief, /trusted ledger note/);
+  assert.match(brief, /use ripgrep for search/);
+  assert.doesNotMatch(brief, /older ledger rule/, "only the two newest tag matches are injected");
+  assert.doesNotMatch(brief, /agent ledger note/);
+  assert.ok(recallLines.length >= injected.length);
+
+  const alreadyVisible = buildBrief({
+    task: "follow the newest unrelated plan",
+    contract: [],
+    decisions: [{ type: "decision", text: "newest unrelated", tags: ["newest"] }],
+    corrections: [],
+    recallPool: [{ type: "decision", text: "newest unrelated", tags: ["newest"] }],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.doesNotMatch(alreadyVisible, /^recall:/m);
+
+  assert.deepEqual(
+    selectTaskRecall("the and for", [{ type: "note", text: "stopwords only", tags: ["the"] }], new Set()),
+    [],
+  );
 });

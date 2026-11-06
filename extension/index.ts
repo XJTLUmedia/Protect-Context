@@ -89,6 +89,7 @@ import {
   type VerifyRun,
 } from "./lib/verify.ts";
 import { buildStatus, type StatusData } from "./lib/status.ts";
+import { LIMIT_DEFAULT as RECALL_LIMIT_DEFAULT, type RecallType, renderRecall, searchStore, trustedRecallPool } from "./lib/recall.ts";
 
 const WIDGET_ID = "protect-context";
 const BRIEF_CUSTOM_TYPE = "guard-brief";
@@ -606,6 +607,7 @@ export default function (pi: ExtensionAPI) {
       decisions: trustedEntries(journal, "decision"),
       corrections: trustedEntries(journal, "correction"),
       agentNotes: recentAgentEntries(journal, journal.length),
+      recallPool: trustedRecallPool(journal),
       loops,
       lastEvidence: last ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms } : null,
     });
@@ -1233,6 +1235,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Read recent journal entries",
     promptGuidelines: [
       "Use guard_journal to recover earlier decisions, corrections, and your own notes after a compaction.",
+      "When you need a tag, evidence id, or older row outside this recent slice, use guard_recall.",
     ],
     parameters: Type.Object({
       limit: Type.Optional(Type.Integer({ description: "How many entries to read (0-20, default 5)" })),
@@ -1251,6 +1254,64 @@ export default function (pi: ExtensionAPI) {
       return Promise.resolve({ content: [{ type: "text", text }], details: {} });
     },
   });
+
+  pi.registerTool({
+    name: "guard_recall",
+    label: "Guard Recall",
+    description:
+      "Search the retained journal and evidence window (read-only, no embeddings). Keywords are case-insensitive " +
+      "substrings of text, command, and digest; every keyword must match. tags are AND. type filters " +
+      "decision|correction|risk|note|evidence. evidence_id matches one ev-NNNN row. cmd is a fingerprint or " +
+      "substring of a verify run. Hits are ranked by match strength, then recency, and labelled trusted or agent " +
+      "(agent notes are unverified).",
+    promptSnippet: "Search retained journal entries and evidence",
+    promptGuidelines: [
+      "Use guard_recall when the brief hid older decisions or you need an evidence id, tag, or command from the retained window.",
+      "Treat hits labelled agent as unverified; cite evidence ids before claiming success.",
+    ],
+    parameters: Type.Object({
+      query: Type.Optional(
+        Type.String({ description: "Keywords (AND). Case-insensitive substring over text, cmd, and digest." }),
+      ),
+      type: Type.Optional(
+        Type.Unsafe<RecallType>({
+          type: "string",
+          enum: ["decision", "correction", "risk", "note", "evidence"],
+        }),
+      ),
+      tags: Type.Optional(Type.Array(Type.String({ description: "Tag that must be present (AND)" }))),
+      limit: Type.Optional(Type.Integer({ description: "Max hits (0–20, default 5)" })),
+      evidence_id: Type.Optional(Type.String({ description: "Exact evidence id, ev-NNNN" })),
+      cmd: Type.Optional(Type.String({ description: "Verify-run fingerprint or substring" })),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      try {
+        const text = renderRecall(
+          searchStore(ctx.cwd, {
+            query: params.query ?? "",
+            type: params.type,
+            tags: params.tags,
+            limit: params.limit === undefined ? RECALL_LIMIT_DEFAULT : params.limit,
+            evidenceId: params.evidence_id,
+            cmd: params.cmd,
+          }),
+        );
+        return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "recall failed";
+        return Promise.resolve({
+          content: [
+            {
+              type: "text",
+              text: `PC recall · error: ${message}\nNudge: pass a valid type, evidence id, or integer limit.`,
+            },
+          ],
+          details: {},
+        });
+      }
+    },
+  });
+
   pi.registerTool({
     name: "guard_contract_check",
     label: "Guard Contract Check",

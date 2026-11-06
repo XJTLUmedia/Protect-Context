@@ -55,6 +55,7 @@ change is correct. [`SPEC.md`](./SPEC.md) is the frozen v1.0 contract.
 - [How it works](#how-it-works)
   - [Session lifecycle](#session-lifecycle)
   - [The brief](#the-brief)
+  - [Local recall](#local-recall)
   - [Evidence and loop detection](#evidence-and-loop-detection)
   - [Scope audit](#scope-audit)
   - [Trust and provenance](#trust-and-provenance)
@@ -91,6 +92,7 @@ without turning the agent into a different agent.
 | **Loop brake** | Identical failing commands are fingerprinted; the Nth attempt is blocked instead of re-run | Hard block in pi and the CLI; reported through MCP |
 | **Scope audit** | `git` diff stats over tracked, staged, and bounded untracked work, with `ok` / `warn` / `hard` verdicts | Widget and `status` in pi; `diff`, `guard_diff_audit` |
 | **Journal** | Durable `decision` / `correction` / `risk` / `note` entries with tags and trust levels | `guard_note`, `protect-context note`, `guard_journal` |
+| **Recall** | Keyword, tag, type, evidence-id, and command search over the retained journal and evidence window — no embeddings | `guard_recall`, `protect-context recall`; the brief names it when a cap hides entries |
 | **Risky-command confirm** | Nine catastrophic shell patterns get one grouped confirmation instead of none | pi, when a UI is available |
 | **Preflight** | Tool presence and versions plus Git worktree detection | `preflight`, `guard_preflight` |
 | **Context budget** | Watermarks on context usage and hard caps on every injected block | Widget, `budget`, `guard_budget` |
@@ -134,8 +136,8 @@ Tool "guard_verify" conflicts with /home/you/.pi/agent/extensions/protect-contex
 ```
 
 One error is reported per tool (`guard_verify`, `guard_note`,
-`guard_contract_check`, `guard_status`), so nothing from the npm copy loads
-until the other copy is gone.
+`guard_contract_check`, `guard_status`, `guard_journal`, `guard_recall`), so
+nothing from the npm copy loads until the other copy is gone.
 
 Or copy/symlink the checkout into a trusted extension directory:
 
@@ -185,9 +187,9 @@ either: `uvx protect-context mcp` runs the same server straight from PyPI. Set
 }
 ```
 
-The MCP surface exposes the nine frozen v1.0 tools plus two compatible read
-surfaces added to close the original reachability gaps (`guard_journal` and
-`guard_orientation`). Tools carry conservative MCP annotations; in particular
+The MCP surface exposes the nine frozen v1.0 tools plus later read surfaces
+(`guard_journal`, `guard_orientation`, and `guard_recall`). Tools carry
+conservative MCP annotations; in particular
 `guard_verify` is marked destructive and open-world because it can run any
 shell command. Annotations are host hints, not enforcement — configure the host
 to require human approval for that tool.
@@ -289,6 +291,7 @@ PC Δ+88L/6f 0loop ev5 ctx8%
 | Loop blocking | blocks the command | `guard_loop_check` reports and advises | `verify` refuses; `loops` exits 1 |
 | Scope audit | session-start baseline + warnings | `guard_diff_audit` (explicit baseline) | `diff --baseline REF` |
 | Journal write/read | `guard_note`, `/guard-note`, `guard_journal` | `guard_note`, `guard_journal` | `note`, `journal` |
+| Recall across the retained window | `guard_recall`; brief may surface 1–2 trusted tag matches | `guard_recall` | `recall` |
 | Trusted re-injection of decisions | yes, after change and after every compaction (incl. mid-run) | read views only | read views only |
 | Re-injection of the agent's own notes | yes, in an explicitly unverified section | read views only | read views only |
 | Owner task anchor | `/guard-task`, auto-captured from the first prompt | — | — |
@@ -318,6 +321,7 @@ Model-callable tools:
 | `guard_verify` | `command`, `timeout_s` (default 180, clamped 1–900) | Records `ev-NNNN`; refusal on a blocked loop |
 | `guard_note` | `type`, `text`, optional `tags` | Forced to the `agent` trust level |
 | `guard_journal` | `limit` (0–20, default 5), optional `type` | Read-only; recovers decisions, corrections, and the agent's own earlier notes after a compaction |
+| `guard_recall` | `query`, `type`, `tags` (AND), `limit` (0–20, default 5), `evidence_id`, `cmd` | Read-only scan of the retained window; hits labelled `trusted` or `agent` |
 | `guard_contract_check` | `summary` | Deterministic keyword coverage checklist, never a proof |
 | `guard_status` | — | Same data that feeds the widget, including journal totals |
 
@@ -331,6 +335,7 @@ Model-callable tools:
 | `guard_contract` | local mutation | `list` · `add` · `remove` |
 | `guard_note` | local append | Journal an entry (tagged `agent`) |
 | `guard_journal` | read-only | Recent journal entries, optionally filtered by type |
+| `guard_recall` | read-only | Search the retained journal and evidence window by keyword, tag, type, evidence id, or command |
 | `guard_loop_check` | local, initializing read | Failing-command streaks and advice |
 | `guard_diff_audit` | local, initializing read | Diff stats and verdict vs thresholds |
 | `guard_preflight` | local, initializing read | Tool/version and worktree check |
@@ -352,6 +357,7 @@ protect-context contract add "Keep the public API stable" [--global]
 protect-context contract remove ID [--global]
 protect-context note correction "use rg, not grep" --tags search
 protect-context journal [--limit 5] [--type decision]
+protect-context recall [QUERY] [--type decision|correction|risk|note|evidence] [--tag TAG] [--limit 5] [--evidence-id ev-NNNN] [--cmd FINGERPRINT]
 protect-context orientation
 protect-context loops
 protect-context diff [--baseline REF]
@@ -506,7 +512,7 @@ when owner rows are malformed, preserving the original file for repair.
 | 3 | Editing too much / scope creep | Git diff audit over tracked, staged, and bounded non-ignored untracked work; safe explicit baselines | Warn/advisory |
 | 4 | Misunderstanding the repo | Worktree-root-aware bounded orientation digest in pi, CLI, and MCP; conventions-file discovery | Automatic context + explicit read |
 | 5 | Plausible but subtly wrong code | Deterministic contract checklist, verification gate, test-required seed | Heuristic/advisory |
-| 6 | Losing earlier context | Persistent journal; owner task anchor; recent trusted decisions re-injected after change and after every compaction (including mid-run threshold/overflow); agent notes re-injected as unverified; `guard_journal` read views | Automatic context + explicit read |
+| 6 | Losing earlier context | Persistent journal; owner task anchor; recent trusted decisions re-injected after change and after every compaction (including mid-run threshold/overflow); agent notes re-injected as unverified; `guard_journal` read views; `guard_recall` searches the retained window | Automatic context + explicit read |
 | 7 | Repeating corrected behavior | Bounded tagged corrections; trusted corrections re-injected; model-authored entries retained for owner review | Automatic context + trust boundary |
 | 8 | Large diffs | Configurable line/file warning and hard-level notifications, status verdict, widget | Warn/advisory |
 | 9 | Repetitive debugging loops | Shared bash/evidence streak reconstruction; third identical failing command blocked by default in pi, CLI, and MCP | Hard block at configured threshold |
@@ -545,9 +551,39 @@ its own failure mode. Within the frozen 12-line constraint cap:
 
 An agent-authored constraint therefore cannot crowd out a seed. Below the
 contract it carries up to 3 recent trusted decisions, up to 3 trusted
-corrections, up to 2 open loops, and the last evidence ID with its exit code,
-duration, and a truncated command. `brief_mode: "changed"` (default) injects
-only when the rendered digest actually changed, so a quiet turn costs nothing.
+corrections, up to 2 unverified agent notes, up to 2 open loops, and the last
+evidence ID with its exit code, duration, and a truncated command. When a cap
+hides journal entries, the brief points at `guard_recall`. If the owner task's
+words match a tag on a trusted entry that did not fit, it also injects at most
+two of those matches. `brief_mode: "changed"` (default) injects only when the
+rendered digest actually changed, so a quiet turn costs nothing.
+
+### Local recall
+
+`guard_recall` (and `protect-context recall`) scans the retained window: the
+live `journal.jsonl` and `verify_runs.jsonl` files plus the rotated segments
+the other readers already concatenate. It does not embed text and it does not
+add a vector index.
+
+Filters combine with AND:
+
+- **keywords** — every word must occur as a case-insensitive substring of
+  journal text, a verify command, or a verify digest. A word that is itself
+  `ev-NNNN` also matches that evidence id (`ev-7` and `ev-0007` are the same id).
+- **`--type` / `type`** — `decision`, `correction`, `risk`, `note`, or `evidence`.
+- **`--tag` / `tags`** — every tag must be present. Matching is exact and
+  case-insensitive. Evidence rows have no tags, so a tag filter excludes them.
+- **`--evidence-id` / `evidence_id`** — one exact evidence id.
+- **`--cmd` / `cmd`** — the frozen command fingerprint, or a substring of it,
+  against verify runs only. Fingerprint matching stays case-sensitive.
+
+Hits are ordered by match strength (text outweighs a command, which outweighs
+a digest; an exact fingerprint outweighs a substring), then by recency. With
+no keywords and no filters, that is simply the newest retained rows. Each
+line is labelled `trusted` or `agent`. Agent hits stay unverified. `limit`
+clamps to 0–20 and defaults to 5. The command is read-only and does not create
+`.agent-guard/` when the store is absent. Rows rotated past the third segment
+are already gone and are not searched.
 
 ### Evidence and loop detection
 
@@ -624,7 +660,7 @@ instead of leaving stale numbers in this README.
 
 | Path | Contents |
 |---|---|
-| `src/protect_context/` | Store, contract, journal, verify, loops, diff scope, orientation, preflight, budget, report, CLI, MCP server |
+| `src/protect_context/` | Store, contract, journal, recall, verify, loops, diff scope, orientation, preflight, budget, report, CLI, MCP server |
 | `extension/` | pi entry point (`index.ts`) and pi-import-free `lib/` modules |
 | `tests/` | pytest suites, including a fastmcp in-memory client smoke over every MCP tool |
 | `extension/test/` | `node --test` suites for fingerprinting, risk patterns, loops, brief digest, widget, git parsing, config |
@@ -638,7 +674,7 @@ instead of leaving stale numbers in this README.
 | `Δ?` in the widget | Not a Git worktree, so no diff baseline | Run inside a repository, or use the CLI with an explicit `--baseline` |
 | `Δ≥` in the widget | Bounded untracked scan hit a cap | Treat the count as a lower bound; narrow the scan or review scope manually |
 | Loop never blocks | Commands differ (paths, flags) so fingerprints differ | Compare with `loops` / `guard_loop_check`; fingerprints intentionally ignore whitespace only |
-| Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes, 120 chars each | Read the full entry with `guard_journal` |
+| Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes, 120 chars each | Read the full entry with `guard_journal`, or search tags and evidence with `guard_recall` |
 | No guard block after an automatic compaction | Host emits no `context` event, so mid-run re-assertion cannot run | It returns at the next user prompt; check the host supports the `context` hook |
 | `task:` line is wrong or missing | Auto-capture ignores short prompts and slash commands, and an owner task always wins | Set it explicitly with `/guard-task <text>` or `/guard-task --clear` |
 | `PC_SESSION_ID` changes nothing in evidence | It scopes ledger *views*, not `state.json` | Expected: state is project-global by design |
@@ -679,9 +715,10 @@ instead of leaving stale numbers in this README.
 #### Determinism
 
 - The frozen brief carries at most 12 constraints, 3 trusted decisions, 3
-  trusted corrections, and 2 agent notes. Overflow is visible (each section
-  announces what it hid) and points at `guard_journal`, but hidden entries are
-  not enforced by context injection.
+  trusted corrections, and 2 agent notes, plus at most 2 trusted tag matches
+  when the owner task names a journal tag the caps hid. Overflow is visible
+  (each section announces what it hid) and points at `guard_journal` and
+  `guard_recall`, but hidden entries are not enforced by context injection.
 - Frozen fingerprint normalization collapses whitespace everywhere, including
   inside quoted shell strings. Semantically different commands can therefore
   share a loop fingerprint.
@@ -715,9 +752,9 @@ instead of leaving stale numbers in this README.
 - Commands and the last 2,000 output characters are stored verbatim. There is
   no automatic secret detector or redactor; never put credentials in commands or
   verification output.
-- JSONL ledgers have no automatic retention or rotation. Output views stay
-  bounded, but long-lived stores grow on disk and full session reconstruction
-  becomes progressively more expensive; archive runtime state deliberately.
+- JSONL ledgers rotate once the live file passes 1 MiB, keeping three older
+  segments. Recall and the other readers see that retained window only; rows
+  rotated past the third segment are gone. Output views stay bounded.
 - Python verification bounds RAM by spooling output to temporary files, but a
   very noisy command can consume temporary disk until it exits. On Windows,
   killing the direct process cannot guarantee that every descendant exits.
@@ -746,8 +783,10 @@ The implementation was checked against primary or professional sources:
 
 No network or LLM calls are made by the guardrail logic itself. It is not a
 sandbox, policy engine, auto-fixer, secret manager, or replacement for pi/MCP
-host permissions. It complements those controls with durable context, evidence,
-telemetry, and narrowly scoped blocking.
+host permissions. Recall is a local scan of the retained JSONL window: the
+suite does not embed journal or evidence text and does not add a vector
+database. The suite complements host permissions with durable context,
+evidence, telemetry, and narrowly scoped blocking.
 
 ## License
 

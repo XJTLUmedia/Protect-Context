@@ -238,6 +238,21 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     assert.match(unavailableDiff.content[0].text as string, /Δ=unknown/);
     fake.failDiff = false;
 
+    const recallTool = fake.tools.get("guard_recall");
+    assert.ok(recallTool, "guard_recall is model-callable");
+    const recalled = await recallTool.execute(
+      "r1",
+      { query: "owner-approved", type: "decision" },
+      null,
+      null,
+      ctx,
+    );
+    const recallText = recalled.content[0].text as string;
+    assert.match(recallText, /trusted · decision/);
+    assert.match(recallText, /owner-approved architecture/);
+    assert.match(recallText, /Nudge:/);
+    assert.doesNotMatch(recallText, /model-only/);
+
     await handler(fake, "turn_end")({}, ctx);
     await handler(fake, "session_shutdown")({}, ctx);
     assert.equal(uiAccesses, 0, "no ctx.ui property is touched when hasUI=false");

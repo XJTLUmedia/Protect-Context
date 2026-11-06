@@ -1,6 +1,6 @@
 # SPEC — protect-context · Agent Guardrail Suite
 
-**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
+**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events; amended 2026-11-06: local `guard_recall` / `recall` over the retained JSONL window, no embeddings) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
 
 ## 0. Mission & principles
 
@@ -144,6 +144,23 @@ CLI verbs (mirror MCP tools; exit 0 ok / 1 warning triggered / 2 error):
 | `guard_budget` | — | session tool-output chars, est. tokens, top-5 tools |
 
 `guard_verify` runs via `subprocess.run(cmd, shell=True, timeout=timeout_s, capture_output=True)`; never raises on nonzero exit — it RECORDS it (that is the point).
+
+### Amendment 2026-11-06 — local recall
+
+The frozen tool table and CLI verb list above are unchanged. A later read-only
+surface searches the retained journal and evidence window (live JSONL plus the
+rotated segments readers already concatenate):
+
+- MCP and pi: `guard_recall`
+- CLI: `recall [QUERY] [--type decision|correction|risk|note|evidence] [--tag TAG] [--limit N] [--evidence-id ev-NNNN] [--cmd FINGERPRINT]`
+
+Keywords are a case-insensitive AND over `text`, `cmd`, and `digest` (an
+`ev-NNNN` token also matches that evidence id). Tags are case-insensitive AND.
+Command matching is the frozen fingerprint, or a substring of it, and applies
+to verify runs. Hits are ranked by match strength, then recency, and labelled
+`trusted` or `agent`. No vector database and no embeddings. The pi brief may
+add one hint when a cap hides entries, plus at most two trusted tag matches
+for the owner task. See README.
 
 ## 5. pi extension (`extension/`)
 

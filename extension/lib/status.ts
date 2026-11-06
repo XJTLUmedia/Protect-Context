@@ -58,7 +58,9 @@ export function buildStatus(d: StatusData): string {
   }
   if ((d.journalCount ?? 0) > 0) {
     // Make the read path discoverable: journal entries are not all re-injected.
-    lines.push(`journal: ${d.journalCount} entries (${d.agentNoteCount ?? 0} agent) — guard_journal reads them`);
+    lines.push(
+      `journal: ${d.journalCount} entries (${d.agentNoteCount ?? 0} agent) — guard_journal reads them; guard_recall searches`,
+    );
   }
   if (d.lastVerify) {
     lines.push(`last verify: ${formatVerifyLine(d.lastVerify)}`);
