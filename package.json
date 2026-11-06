@@ -1,6 +1,6 @@
 {
   "name": "protect-context",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Pi extension that adds agent guardrails: context brief, verification evidence, loop blocking, diff-scope warnings, and a durable journal.",
   "type": "module",
   "license": "MIT",
