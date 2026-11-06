@@ -7,12 +7,12 @@
     "url": "https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent",
     "source": "github"
   },
-  "version": "2.0.0",
+  "version": "3.0.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "protect-context",
-      "version": "2.0.0",
+      "version": "3.0.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
