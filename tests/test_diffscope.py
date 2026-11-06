@@ -250,3 +250,35 @@ def test_render_bounds_and_normalizes_git_errors():
 
 def test_git_head_none_outside_repo():
     assert diffscope.git_head() is None
+
+
+def test_translate_windows_and_wsl_unc_paths():
+    assert diffscope.translate_windows_path(r"C:\repo\sub") == "/mnt/c/repo/sub"
+    assert diffscope.translate_windows_path("D:/Work/proj") == "/mnt/d/Work/proj"
+    assert diffscope.translate_windows_path(r"\\wsl$\Ubuntu\home\me\proj") == "/home/me/proj"
+    assert diffscope.translate_windows_path("//wsl.localhost/Debian/home/me/proj") == "/home/me/proj"
+    assert diffscope.translate_windows_path("/already/posix") is None
+
+
+def test_resolve_git_root_prefers_an_existing_translation(monkeypatch, tmp_path):
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(diffscope, "translate_windows_path", lambda _text: str(target))
+    assert diffscope.resolve_git_root(r"C:\repo") == target.resolve()
+
+
+def test_resolve_git_root_falls_back_when_translation_is_missing(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    missing = tmp_path / "missing-mnt"
+    monkeypatch.setattr(diffscope, "translate_windows_path", lambda _text: str(missing))
+    assert diffscope.resolve_git_root("relative-root") == (tmp_path / "relative-root").resolve()
+
+
+def test_untracked_backslash_paths_are_counted_on_posix(tmp_path):
+    root = tmp_path / "repo"
+    nested = root / "sub"
+    nested.mkdir(parents=True)
+    (nested / "file.txt").write_text("one\ntwo\n", encoding="utf-8")
+    scan = diffscope._scan_untracked(root.resolve(), [r"sub\file.txt"], 800)
+    assert scan["lines"] == 2
+    assert scan["skipped_files"] == 0

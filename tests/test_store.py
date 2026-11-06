@@ -58,6 +58,22 @@ def test_read_jsonl_missing_file(tmp_path):
     assert store.read_jsonl(tmp_path / "nope.jsonl") == []
 
 
+def test_append_isolates_a_torn_tail(tmp_path):
+    """A crashed writer can leave a partial line with no newline. The next
+    append must not glue onto it, or both records become unreadable."""
+    path = tmp_path / "x.jsonl"
+    path.write_bytes(b'{"ok": 1}\n{"ok": "torn"')
+    store.append_jsonl(path, {"ok": 2})
+    assert store.read_jsonl(path) == [{"ok": 1}, {"ok": 2}]
+
+
+def test_append_preserves_a_complete_record_that_lacked_a_newline(tmp_path):
+    path = tmp_path / "x.jsonl"
+    path.write_bytes(b'{"ok": 1}')
+    store.append_jsonl(path, {"ok": 2})
+    assert store.read_jsonl(path) == [{"ok": 1}, {"ok": 2}]
+
+
 def test_flock_concurrent_appends_integrity(tmp_path):
     """Many threads appending concurrently → every line intact (flock works)."""
     p = tmp_path / "conc.jsonl"

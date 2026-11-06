@@ -92,6 +92,34 @@ def test_render_has_nudge(write_events):
     assert "no repeated failing commands" in empty and "Nudge:" in empty
 
 
+def test_trailing_semicolon_shares_a_streak(write_events):
+    write_events([_fail("pytest -q"), _fail("pytest -q;")])
+    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2}]
+    cfg = store.load_config()
+    blocked = loops.command_block("pytest -q;", cfg)
+    assert blocked is not None and blocked["count"] == 2
+
+
+def test_quoted_semicolon_does_not_merge_with_the_bare_command(write_events):
+    write_events([_fail("echo"), _fail('echo ";"')])
+    assert {row["cmd"] for row in loops.streaks()} == {"echo", 'echo ";"'}
+
+
+def test_masked_success_does_not_reset_and_matches_the_underlying_command(write_events):
+    write_events([
+        _fail("npm test"),
+        _fail("npm test"),
+        _ok("npm test || true"),
+    ])
+    assert loops.streaks() == [{"cmd": "npm test", "count": 2}]
+    cfg = store.load_config()
+    blocked = loops.command_block("npm test || true", cfg)
+    assert blocked is not None and blocked["cmd"] == "npm test"
+    # A real success of the same command still clears the streak.
+    write_events([_fail("npm test"), _fail("npm test"), _ok("npm test")])
+    assert loops.streaks() == []
+
+
 def test_whitespace_variants_share_one_fingerprint(write_events):
     # cmd is stored fingerprint-normalized (SPEC §2); if un-normalized data
     # sneaks in, streaks still collapse whitespace variants together.

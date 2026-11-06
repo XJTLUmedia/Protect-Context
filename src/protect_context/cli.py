@@ -8,6 +8,9 @@ Every output ends with a one-line actionable "Nudge:".
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
+import subprocess
 
 from . import (
     budget,
@@ -66,13 +69,33 @@ def cmd_status(args: argparse.Namespace) -> int:
     return level
 
 
+def _join_verify_command(parts: list[str]) -> str:
+    """One shell string from argv.
+
+    A single argument is kept verbatim so ``verify "false | true"`` still
+    runs the pipeline the user quoted. Several arguments are re-quoted, so
+    ``verify pytest -q`` and ``verify echo "hello world"`` work. ``--timeout``
+    must come before the command: argparse stops at the remainder.
+    """
+    parts = [part for part in parts if part != ""]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
-    if not args.command.strip():
+    command = _join_verify_command(list(args.command))
+    if not command.strip():
         print("PC verify · error: command must not be blank")
-        print("Nudge: pass a concrete verification command tied to the claim.")
+        print("example: protect-context verify --timeout 60 pytest -q")
+        print("Nudge: pass a concrete verification command tied to the claim. Put --timeout before the command.")
         return 2
     cfg = store.load_config()
-    blocked = loops.command_block(args.command, cfg)
+    blocked = loops.command_block(command, cfg)
     if blocked:
         print(
             f"PC verify blocked · {store.display_text(blocked['cmd'], 80)} · "
@@ -80,9 +103,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
         print("Nudge: change approach or gather new information — do not re-run unchanged.")
         return 1
-    entry = verify.run_verify(args.command, args.timeout_s)
+    entry = verify.run_verify(command, args.timeout_s)
     print(verify.render_entry(entry))
-    return 0 if entry["ok"] else 1
+    # Exit 0 is only for a trustworthy pass. A pipeline or failure mask can
+    # make the shell return 0 without proving the check; that is a warning.
+    if not entry["ok"] or verify.outcome_label(entry) == "UNTRUSTED":
+        return 1
+    return 0
 
 
 def cmd_evidence(args: argparse.Namespace) -> int:
@@ -253,9 +280,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="compact status dashboard")
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("verify", help="run CMD and record evidence (shell verbatim)")
-    sp.add_argument("command")
+    sp = sub.add_parser(
+        "verify",
+        help="run a shell command and record evidence (put --timeout before the command)",
+    )
     sp.add_argument("--timeout", dest="timeout_s", type=int, default=180)
+    sp.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="shell command: one quoted string, or words (flags such as -q are part of the command)",
+    )
     sp.set_defaults(func=cmd_verify)
 
     sp = sub.add_parser("evidence", help="recent verify runs")

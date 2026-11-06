@@ -62,6 +62,7 @@ import { toolCallEvent, toolResultEvent, bashExitFromResult, type EventRecord } 
 import {
   failedAttemptsFromLedgers,
   loopBlockReason,
+  noteLoopOutcome,
   openLoopsFromMap,
   shouldBlockLoop,
   type LoopInfo,
@@ -81,10 +82,11 @@ import { renderOrientation, scanOrientation } from "./lib/orientation.ts";
 import {
   clampTimeoutS,
   digestOf,
-  formatMs,
+  loopKey,
   nextEvidenceId,
   readVerifyRuns,
   readVerifyRowsForIds,
+  renderVerifyReport,
   runsForSession,
   type VerifyRun,
 } from "./lib/verify.ts";
@@ -330,14 +332,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Incremental loop-state update for a finished bash call (O(1)). */
   function recordLoopOutcome(cmd: string, ok: boolean, exit: number | null): void {
-    if (ok) {
-      loopState.delete(cmd); // success resets the streak (mirrors loops.py)
-      return;
-    }
-    const cur = loopState.get(cmd) ?? { cmd, failures: 0, lastExit: null };
-    cur.failures += 1;
-    if (exit !== null) cur.lastExit = exit;
-    loopState.set(cmd, cur);
+    noteLoopOutcome(loopState, cmd, ok, exit);
   }
 
   /** Evidence for the current session, memoized by the ledger's mtime+size
@@ -449,6 +444,7 @@ export default function (pi: ExtensionAPI) {
       throw new Error("verification command must not be blank");
     }
     const fp = normalizeCommand(command);
+    const streakKey = loopKey(command);
     const timeoutS = clampTimeoutS(timeoutSraw);
 
     // (a) risk patterns → single grouped confirm; no-UI: log only, never block
@@ -477,7 +473,7 @@ export default function (pi: ExtensionAPI) {
 
     // (b) loop check on fingerprint — identical arithmetic to the bash path
     refreshLoopStateIfChanged(ctx.cwd);
-    const failures = loopState.get(fp)?.failures ?? 0;
+    const failures = loopState.get(streakKey)?.failures ?? 0;
     if (shouldBlockLoop(failures, cfg.loop_block_after)) {
       return `${loopBlockReason(truncLine(fp, CMD_DISPLAY_MAX), failures)}\nNudge: not run, not recorded — change approach or gather new information first.`;
     }
@@ -510,18 +506,7 @@ export default function (pi: ExtensionAPI) {
     evidenceMemo = null;
     sessionEvidence(ctx.cwd);
     renderWidgetNow(ctx);
-    const lines: string[] = [`${run.id} exit=${run.exit} ${formatMs(run.ms)} '${truncLine(run.cmd, CMD_DISPLAY_MAX)}'`];
-    if (!run.ok) {
-      // Failure diagnostics (pytest summaries, compiler errors) live at the
-      // END of output — and the digest rule is "last ≤2000 chars" — so show
-      // the TAIL, not the head, or the only visible preview is spent on banners.
-      const tail = truncLine(run.digest.slice(-160), 160);
-      if (tail) lines.push(`out: ${run.digest.length > 160 ? "…" : ""}${tail}`);
-      lines.push(`Nudge: recorded the failure — fix or change approach; do not re-run unchanged.`);
-    } else {
-      lines.push(`Nudge: cite ${run.id} when claiming success.`);
-    }
-    return lines.join("\n");
+    return renderVerifyReport(run, ctx.cwd);
   }
 
   // --- events ----------------------------------------------------------
@@ -714,6 +699,7 @@ export default function (pi: ExtensionAPI) {
       const raw = typeof event.input.command === "string" ? event.input.command : "";
       if (raw.trim() === "") return undefined;
       const fp = normalizeCommand(raw);
+      const streakKey = loopKey(raw);
 
       // (a) risk patterns → single grouped confirm; no-UI: log only, never block
       const risk = matchRisk(fp);
@@ -760,7 +746,7 @@ export default function (pi: ExtensionAPI) {
       // in-memory check and the tool-call record.
       const blockedFailures = withStoreLock(storeDir(ctx.cwd), () => {
         if (loopLedgerMemo !== loopLedgerStamp(ctx.cwd)) rebuildLoopStateUnlocked(ctx.cwd);
-        const failures = loopState.get(fp)?.failures ?? 0;
+        const failures = loopState.get(streakKey)?.failures ?? 0;
         if (shouldBlockLoop(failures, cfg.loop_block_after)) {
           appendJsonlLocked(
             eventsPath(ctx.cwd),
@@ -1162,11 +1148,13 @@ export default function (pi: ExtensionAPI) {
     label: "Guard Verify",
     description:
       "Run a verification command and record evidence (id, exit, digest) in .agent-guard/verify_runs.jsonl. " +
-      "Never raises on nonzero exit — it records the failure. Cite the evidence id when claiming success. " +
+      "Never raises on nonzero exit — it records the failure and says why and how to re-run. " +
+      "Cite the evidence id only when the report says ok. Exit 0 from a pipeline or `|| true` is UNTRUSTED and is not proof. " +
       "timeout_s is clamped to [1, 900] so a runaway value cannot wedge the session.",
     promptSnippet: "Run a verification command and record evidence",
     promptGuidelines: [
-      "Use guard_verify to run verification commands; cite the returned evidence id when claiming success.",
+      "Use guard_verify to run verification commands. Cite the evidence id only when the report says ok.",
+      "If the report says FAIL, follow its fix line. If it says UNTRUSTED, re-run without a pipe or || true before claiming success.",
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to run for verification" }),

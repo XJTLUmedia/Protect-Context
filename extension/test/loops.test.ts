@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   failedAttempts,
   failedAttemptsFromLedgers,
+  noteLoopOutcome,
   openLoops,
   openLoopsFromMap,
   shouldBlockLoop,
@@ -137,6 +138,28 @@ test("loops: cross-runtime ISO offsets are ordered as instants, not raw strings"
   const map = failedAttemptsFromLedgers(events, [earlierFailure], S);
 
   assert.equal(map.has("npm test"), false, "later success resets the earlier failure");
+});
+
+test("loops: a trailing semicolon and a failure mask share the underlying streak", () => {
+  const events = [
+    ev(S, "pytest -q", false, 1),
+    ev(S, "pytest -q;", false, 1),
+  ];
+  const map = failedAttempts(events, S);
+  assert.equal(map.get("pytest -q")?.failures, 2);
+  assert.equal(map.has("pytest -q;"), false);
+
+  const masked = [
+    ev(S, "npm test", false, 1),
+    ev(S, "npm test", false, 1),
+    ev(S, "npm test || true", true, 0),
+  ];
+  const held = failedAttempts(masked, S);
+  assert.equal(held.get("npm test")?.failures, 2, "|| true must not reset the streak");
+
+  const live = new Map(held);
+  noteLoopOutcome(live, "npm test", true, 0);
+  assert.equal(live.has("npm test"), false, "a real success still resets");
 });
 
 test("loops: malformed persisted command fields are ignored defensively", () => {

@@ -78,8 +78,10 @@ def guard_verify(command: str, timeout_s: int = 180) -> str:
     """Run a command and RECORD the outcome as evidence (id, exit, digest) in
     verify_runs.jsonl. shell=True is by design: the command runs verbatim with
     the caller's own privileges — this is an evidence ledger, not a sandbox.
-    Never raises on nonzero exit; failures are recorded (that is the point).
-    timeout_s is clamped to [1, 900] so a runaway value cannot wedge the host.
+    Never raises on nonzero exit; failures are recorded and the text says why
+    and how to re-run. Exit 0 from a pipeline or a failure mask (`|| true`) is
+    labelled UNTRUSTED and is not proof. stdin is closed so a command cannot
+    read the MCP protocol. timeout_s is clamped to [1, 900].
     """
     if not command.strip():
         return (

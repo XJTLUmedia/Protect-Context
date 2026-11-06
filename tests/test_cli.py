@@ -241,6 +241,28 @@ def test_budget_smoke(capsys):
 
 # ---- error mapping ----------------------------------------------------------
 
+def test_verify_accepts_command_words_and_flags(capsys):
+    assert main(["verify", "echo", "hello-from-words"]) == 0
+    assert "hello-from-words" in capsys.readouterr().out
+    assert main(["verify", "--timeout", "5", "echo", "-n", "flagged"]) == 0
+    assert "flagged" in capsys.readouterr().out
+
+
+def test_verify_without_a_command_explains_usage(capsys):
+    assert main(["verify"]) == 2
+    out = capsys.readouterr().out
+    assert "must not be blank" in out
+    assert "--timeout" in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_untrusted_pipeline_is_a_warning_exit(capsys):
+    assert main(["verify", "false | true"]) == 1
+    out = capsys.readouterr().out
+    assert "UNTRUSTED" in out and "pipefail" in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
 def test_missing_binary_is_warning_not_error(capsys):
     rc = main(["verify", "definitely-missing-binary-xyz"])
     assert rc == 1  # recorded evidence of failure, not a tool error

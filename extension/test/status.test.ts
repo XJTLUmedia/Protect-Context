@@ -46,6 +46,25 @@ test("status: loop commands are truncated in the nudge", () => {
   assert.ok(out.includes("…"), "truncation marker present");
 });
 
+test("status: an exit-0 pipeline is not a success nudge", () => {
+  const out = buildStatus(
+    data({
+      lastVerify: {
+        id: "ev-0004",
+        ts: "",
+        session: "",
+        cmd: "false | true",
+        exit: 0,
+        ok: true,
+        digest: "",
+        ms: 1,
+      },
+    }),
+  );
+  assert.match(out, /UNTRUSTED/);
+  assert.match(out, /not trustworthy/);
+});
+
 test("status: unavailable and bounded diff states never look clean", () => {
   const unavailable = buildStatus(data({ diffAvailable: false }));
   assert.match(unavailable, /Δ=unknown/);

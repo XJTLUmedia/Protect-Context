@@ -3,6 +3,8 @@
 import json
 import os
 import shutil
+import subprocess
+import sys
 import time
 
 import pytest
@@ -203,12 +205,138 @@ def test_timeout_kills_whole_process_group():
 # ---- failure previews show the TAIL (token-ux) --------------------------------
 
 def test_render_entry_failure_shows_tail_not_head():
-    """Failure diagnostics (pytest summaries, compiler errors) live at the END
-    of output; the digest rule is 'last ≤2000 chars', so the preview must be
-    the tail, not the head banner."""
+    """Failure diagnostics live at the END of output. A long banner must not
+    be the only thing the report shows, and the report must say how to re-run."""
     cmd = "printf 'banner line\\n'; printf 'actual error at the end\\n' 1>&2; exit 3"
     e = verify.run_verify(cmd)
     assert e["ok"] is False
-    digest_line = verify.render_entry(e).splitlines()[1]
-    assert "error at the end" in digest_line
-    assert "banner line" not in digest_line
+    text = verify.render_entry(e)
+    assert "actual error at the end" in text
+    assert "why:" in text and "fix:" in text
+    assert "cwd:" in text
+    assert text.rstrip().splitlines()[-1].startswith("Nudge:")
+
+    long_cmd = (
+        "i=0; while [ \"$i\" -lt 30 ]; do echo banner-$i; i=$((i+1)); done; "
+        "echo 'actual error at the end' 1>&2; exit 3"
+    )
+    long_text = verify.render_entry(verify.run_verify(long_cmd))
+    assert "actual error at the end" in long_text
+    assert "banner-0" not in long_text
+
+
+def test_pipeline_exit_zero_is_recorded_but_untrusted():
+    """`false | true` exits 0 because the shell reports only the last stage.
+    The ledger keeps that honest exit code and the report refuses to call it proof."""
+    e = verify.run_verify("false | true")
+    assert e["ok"] is True and e["exit"] == 0
+    assert verify.outcome_label(e) == "UNTRUSTED"
+    text = verify.render_entry(e)
+    assert "UNTRUSTED" in text and "pipefail" in text
+    assert "not evidence of success" in text
+    assert text.rstrip().splitlines()[-1].startswith("Nudge:")
+    # The frozen ledger row is unchanged: cwd is a report field, not a column.
+    row = store.read_jsonl(store.verify_path())[-1]
+    assert set(row) == {"id", "ts", "session", "cmd", "exit", "ok", "digest", "ms"}
+    assert row["ok"] is True
+
+
+def test_failure_mask_is_untrusted():
+    e = verify.run_verify("false || true")
+    assert e["ok"] is True
+    text = verify.render_entry(e)
+    assert verify.outcome_label(e) == "UNTRUSTED"
+    assert "masks failure" in text
+    assert "Do not cite this id as proof." in text
+
+
+def test_quoted_pipe_and_quoted_mask_stay_trusted():
+    piped = verify.run_verify("echo 'a|b'")
+    assert piped["ok"] is True
+    assert verify.outcome_label(piped) == "ok"
+    assert "UNTRUSTED" not in verify.render_entry(piped)
+    masked = verify.run_verify('echo "|| true"')
+    assert verify.outcome_label(masked) == "ok"
+    assert verify.failure_masked('echo "|| true"') is False
+    assert verify.failure_masked("false || true") is True
+    assert verify.failure_masked("false; exit 0") is True
+    assert verify.loop_key("npm test; exit 0") == "npm test"
+
+
+def test_missing_command_explains_how_to_fix():
+    text = verify.render_entry(verify.run_verify("definitely-missing-binary-xyz"))
+    assert "FAIL" in text
+    assert "PATH" in text
+    assert "cwd:" in text
+    assert "why:" in text and "fix:" in text
+    assert "guard_preflight" in text
+
+
+def test_ansi_sequences_do_not_consume_the_digest():
+    e = verify.run_verify(r"printf '\033[31mRED\033[0m'")
+    assert "RED" in e["digest"]
+    assert "\x1b" not in e["digest"]
+
+
+def test_runner_oserror_is_recorded_as_evidence(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("cwd gone")
+
+    monkeypatch.setattr(verify.subprocess, "Popen", boom)
+    e = verify.run_verify("true")
+    assert e["ok"] is False and e["exit"] == 127
+    assert "could not run command" in e["digest"]
+    assert verify.count() == 1
+    assert "could not start" in verify.render_entry(e)
+
+
+def test_timeout_does_not_hang_when_the_child_is_not_reaped(monkeypatch):
+    class Fake:
+        def __init__(self):
+            self.returncode = None
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            raise subprocess.TimeoutExpired("cmd", timeout or 1)
+
+        def kill(self):
+            return None
+
+    fake = Fake()
+    monkeypatch.setattr(verify.subprocess, "Popen", lambda *_a, **_k: fake)
+    monkeypatch.setattr(verify, "_terminate_timed_out_process", lambda _p: None)
+    e = verify.run_verify("sleep 100", timeout_s=1)
+    assert e["exit"] == 124 and e["ok"] is False
+    assert fake.waits == 3
+    assert e["ms"] < 4000
+
+
+def test_verify_does_not_inherit_an_open_stdin():
+    """A command that reads stdin must see EOF. Inheriting the parent stdin
+    would hang `read` (and, under MCP, could consume the protocol stream)."""
+    script = (
+        "import json,sys\n"
+        "from protect_context import verify\n"
+        "e = verify.run_verify('read line', timeout_s=3)\n"
+        "json.dump({'exit': e['exit'], 'ms': e['ms']}, sys.stdout)\n"
+    )
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=read_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.close(read_fd)
+        read_fd = -1
+        out, err = proc.communicate(timeout=8)
+    finally:
+        if read_fd >= 0:
+            os.close(read_fd)
+        os.close(write_fd)
+    assert proc.returncode == 0, err.decode("utf-8", "replace")
+    payload = json.loads(out)
+    assert payload["exit"] != 124
+    assert payload["ms"] < 1500

@@ -5,8 +5,7 @@
 
 import type { EventRecord } from "./events.ts";
 import { normalizeOneLine } from "./text.ts";
-import { normalizeCommand } from "./fingerprint.ts";
-import type { VerifyRun } from "./verify.ts";
+import { failureMasked, loopKey, type VerifyRun } from "./verify.ts";
 
 export interface LoopInfo {
   cmd: string;
@@ -42,10 +41,12 @@ function compareOutcomes(a: LoopOutcome, b: LoopOutcome): number {
 }
 
 function applyOutcome(map: Map<string, LoopInfo>, outcome: LoopOutcome): void {
-  const cmd = normalizeCommand(outcome.cmd);
+  const cmd = loopKey(outcome.cmd);
   if (cmd === "") return;
   if (outcome.ok === true) {
-    map.delete(cmd);
+    // `|| true` / `; true` exits 0 without proving the command. Leaving the
+    // streak in place keeps that mask from disarming the loop brake.
+    if (!failureMasked(outcome.cmd)) map.delete(cmd);
     return;
   }
   if (outcome.ok !== false) return;
@@ -143,6 +144,17 @@ export function openLoopsFromMap(map: Map<string, LoopInfo>, loopBlockAfter: num
   }
   out.sort((a, b) => b.failures - a.failures || a.cmd.localeCompare(b.cmd));
   return out;
+}
+
+/** Apply one finished command to an in-memory streak map (same rules as the
+ * ledger rebuild). */
+export function noteLoopOutcome(
+  map: Map<string, LoopInfo>,
+  cmd: string,
+  ok: boolean,
+  exit: number | null,
+): void {
+  applyOutcome(map, { ts: "", cmd, ok, exit, order: 0 });
 }
 
 /** Same, computed from raw events (disk path). */
