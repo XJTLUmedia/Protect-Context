@@ -1,6 +1,6 @@
 # Publish server.json to the official MCP Registry.
 # Authentication is GitHub OIDC. This file adds no secrets and does not publish
-# the npm or PyPI packages — those versions stay at the already-published 3.2.0.
+# the npm or PyPI packages.
 # Docs: https://modelcontextprotocol.io/registry/github-actions
 #
 # A GitHub Release that also creates a new v* tag starts this workflow twice.

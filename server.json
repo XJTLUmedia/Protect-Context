@@ -9,12 +9,12 @@
     "source": "github",
     "id": "1421530469"
   },
-  "version": "3.2.0",
+  "version": "3.2.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "protect-context",
-      "version": "3.2.0",
+      "version": "3.2.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

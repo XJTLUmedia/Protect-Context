@@ -91,7 +91,13 @@ def test_readme_quickstart_leads_with_uvx_and_keeps_pi_first():
     checkout = README.index("/absolute/path/to/protect-context/.venv/bin/python")
     assert pi < uvx < checkout
     assert "claude mcp add protect-context -- uvx protect-context mcp" in README
-    assert "demo-gif-placeholder" in README
+    assert "docs/assets/demo.gif" in README
+    assert "demo-gif-placeholder" not in README
+    assert "api.star-history.com/svg?repos=XJTLUmedia/Protect-Context&type=Date" in README
+    assert "cursor.com/en/install-mcp?name=protect-context&amp;config=" in README
+    assert "vscode.dev/redirect/mcp/install?name=protect-context&amp;config=" in README
+    assert "insiders.vscode.dev/redirect/mcp/install?name=protect-context&amp;config=" in README
+    assert "docs/integrations/cursor.md" in README
     assert "img.shields.io/pypi/v/protect-context" in README
     assert "img.shields.io/npm/v/protect-context" in README
     assert "img.shields.io/pepy/dt/protect-context" in README
