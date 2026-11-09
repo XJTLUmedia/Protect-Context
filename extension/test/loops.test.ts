@@ -155,7 +155,9 @@ test("loops: a trailing semicolon and a failure mask share the underlying streak
     ev(S, "npm test || true", true, 0),
   ];
   const held = failedAttempts(masked, S);
-  assert.equal(held.get("npm test")?.failures, 2, "|| true must not reset the streak");
+  // `|| true` neither resets the streak nor proves the command: it counts as
+  // one more unproven attempt, so masking cannot disarm the brake.
+  assert.equal(held.get("npm test")?.failures, 3, "|| true counts as an unproven attempt");
 
   const live = new Map(held);
   noteLoopOutcome(live, "npm test", true, 0);
@@ -171,4 +173,40 @@ test("loops: malformed persisted command fields are ignored defensively", () => 
   const map = failedAttemptsFromLedgers(malformed, [], S);
 
   assert.deepEqual([...map.keys()], ["valid"]);
+});
+
+test("loops: repeated masked successes count as unproven attempts", () => {
+  // `cmd || true` exits 0 without proving anything: it must not reset, and it
+  // must accumulate so masking cannot disarm the brake.
+  const masked = [
+    ev(S, "npm test || true", true, 0),
+    ev(S, "npm test || true", true, 0),
+  ];
+  const map = failedAttempts(masked, S);
+  assert.equal(map.get("npm test")?.failures, 2);
+});
+
+test("loops: piped verify runs count as unproven; a plain bash success still resets", () => {
+  const run = (cmd: string, ok: boolean, exit: number): any => ({
+    id: `ev-${Math.abs(cmd.length)}${exit}`,
+    ts: "2026-01-01T00:00:00.000Z",
+    session: S,
+    cmd,
+    exit,
+    ok,
+    digest: "",
+    ms: 1,
+  });
+  // guard_verify: exit 0 through a pipe proves only the last stage.
+  const piped = failedAttemptsFromLedgers(
+    [],
+    [run("pytest -q | tail -3", true, 0), run("pytest -q | tail -3", true, 0)],
+    S,
+  );
+  assert.equal(piped.get("pytest -q | tail -3")?.failures, 2);
+
+  // bash tool_result: an ordinary piped but successful command is not evidence,
+  // so it must not invent a streak either.
+  const bash = failedAttempts([ev(S, "git log | head", true, 0)], S);
+  assert.equal(bash.size, 0);
 });

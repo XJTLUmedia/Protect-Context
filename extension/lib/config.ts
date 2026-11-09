@@ -33,6 +33,9 @@ export function mergeConfig(
   if (isInteger(p.diff_warn_files) && p.diff_warn_files >= 0) cfg.diff_warn_files = p.diff_warn_files;
   if (isInteger(p.ctx_warn_pct) && p.ctx_warn_pct >= 0 && p.ctx_warn_pct <= 100) cfg.ctx_warn_pct = p.ctx_warn_pct;
   if (p.brief_mode === "changed" || p.brief_mode === "always") cfg.brief_mode = p.brief_mode;
+  if (isInteger(p.brief_max_precedents) && p.brief_max_precedents >= 0 && p.brief_max_precedents <= 10) {
+    cfg.brief_max_precedents = p.brief_max_precedents;
+  }
   if (typeof p.risk_confirm === "boolean") cfg.risk_confirm = p.risk_confirm;
   const tools = strArray(p.preflight_tools);
   if (tools) cfg.preflight_tools = [...tools];

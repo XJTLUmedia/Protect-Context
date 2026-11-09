@@ -1,8 +1,6 @@
 """Fingerprint-driven loop streaks + cross-format TS events fixture (SPEC §7)."""
 
-import json
-
-from protect_context import loops, store
+from protect_context import loops, store, verify
 
 
 def _fail(cmd, session="test-session"):
@@ -111,7 +109,9 @@ def test_masked_success_does_not_reset_and_matches_the_underlying_command(write_
         _fail("npm test"),
         _ok("npm test || true"),
     ])
-    assert loops.streaks() == [{"cmd": "npm test", "count": 2}]
+    # A masked exit 0 is an unproven attempt, not a success: it counts too, so
+    # `|| true` cannot walk a command back under the block threshold.
+    assert loops.streaks() == [{"cmd": "npm test", "count": 3}]
     cfg = store.load_config()
     blocked = loops.command_block("npm test || true", cfg)
     assert blocked is not None and blocked["cmd"] == "npm test"
@@ -192,3 +192,21 @@ def test_cross_ledger_merge_parses_offsets_instead_of_sorting_raw_strings():
     store.append_jsonl(store.verify_path(), run)
 
     assert loops.streaks() == []
+
+
+def test_masked_successes_accumulate_so_masking_cannot_disarm_the_brake():
+    cfg = store.load_config()
+    for _ in range(3):
+        verify.run_verify("pytest -q || true")
+    streak = loops.streaks()
+    assert streak and streak[0]["count"] == 3, streak
+    assert loops.command_block("pytest -q || true", cfg) is not None
+
+
+def test_piped_verify_runs_count_as_unproven_attempts():
+    # exit 0 through a pipe proves only the last stage: not a success.
+    for _ in range(3):
+        verify.run_verify("true | tail -1")
+    streak = loops.streaks()
+    assert streak and streak[0]["count"] == 3, streak
+    assert loops.command_block("true | tail -1", store.load_config()) is not None

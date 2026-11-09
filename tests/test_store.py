@@ -22,6 +22,9 @@ EXPECTED_CONFIG = {
     "diff_warn_files": 10,
     "ctx_warn_pct": 70,
     "brief_mode": "changed",
+    # Added with the precedents work: brief re-injection cap for `lesson` rows
+    # (0 disables the section). Pinned here and in extension/test/store.test.ts.
+    "brief_max_precedents": 3,
     "risk_confirm": True,
     "preflight_tools": ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
 }
@@ -282,10 +285,11 @@ def test_store_lock_reclaims_an_old_lease_from_a_dead_local_pid():
     lock_dir = store.lease_path()
     lock_dir.parent.mkdir(parents=True)
     lock_dir.mkdir()
+    abandoned = f"abandoned-{child.pid}"
     (lock_dir / "owner.json").write_text(
         json.dumps(
             {
-                "token": "abandoned",
+                "token": abandoned,
                 "pid": child.pid,
                 "hostname": socket.gethostname(),
                 "created_ms": 0,
@@ -300,7 +304,7 @@ def test_store_lock_reclaims_an_old_lease_from_a_dead_local_pid():
         owner = json.loads(
             (store.lease_path() / "owner.json").read_text(encoding="utf-8")
         )
-        assert owner["token"] != "abandoned"
+        assert owner["token"] != abandoned
 
     assert not store.lease_path().exists()
     assert list(store.guard_dir().glob(".lock.d.reap.*")) == []
@@ -356,3 +360,81 @@ def test_store_lock_does_not_remove_a_replacement_owner():
     )
     # Use the token-aware release helper so the test leaves no lock behind.
     store._release_lease(store.lease_path(), replacement["token"])
+
+
+def test_store_lock_body_error_survives_a_failed_release():
+    """A failed release must not replace the error that aborted the body."""
+    replacement = {
+        "token": "replacement",
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "created_ms": int(time.time() * 1000),
+    }
+    with pytest.raises(ValueError, match="body failed"), store.store_lock():
+        (store.lease_path() / "owner.json").write_text(
+            json.dumps(replacement), encoding="utf-8"
+        )
+        raise ValueError("body failed")
+
+    # Use the token-aware release helper so the test leaves no lock behind.
+    store._release_lease(store.lease_path(), replacement["token"])
+
+
+def test_read_jsonl_is_memoized_and_invalidated_by_append(tmp_path):
+    path = tmp_path / "rows.jsonl"
+    store.append_jsonl(path, {"i": 1})
+    store.append_jsonl(path, {"i": 2})
+    first = store.read_jsonl(path)
+    assert [r["i"] for r in first] == [1, 2]
+    second = store.read_jsonl(path)
+    assert second is first, "an unchanged ledger is served from the cache"
+    store.append_jsonl(path, {"i": 3})
+    assert [r["i"] for r in store.read_jsonl(path)] == [1, 2, 3], "an append invalidates the stamp"
+
+
+def test_tail_jsonl_reads_the_live_segment_only(tmp_path):
+    path = tmp_path / "rows.jsonl"
+    for i in range(10):
+        store.append_jsonl(path, {"i": i})
+    assert [r["i"] for r in store.tail_jsonl(path, 3) or []] == [7, 8, 9]
+    assert store.tail_jsonl(path, 0) == []
+    # Not enough rows in the live file: say so instead of returning a short list.
+    assert store.tail_jsonl(path, 50) is None
+    # Rows in rotated segments are out of scope for the tail reader.
+    rotated = tmp_path / "rows.1.jsonl"
+    rotated.write_text('{"i": 99}\n', encoding="utf-8")
+    assert [r["i"] for r in store.tail_jsonl(path, 2) or []] == [8, 9]
+
+
+def test_tail_jsonl_refuses_a_torn_tail(tmp_path):
+    path = tmp_path / "rows.jsonl"
+    store.append_jsonl(path, {"i": 1})
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"i": 2')
+    assert store.tail_jsonl(path, 1) is None
+
+
+def test_brief_max_precedents_is_validated(tmp_path):
+    store.ensure()
+    store.write_json(store.config_path(), {"brief_max_precedents": 7})
+    assert store.load_config()["brief_max_precedents"] == 7
+    store.write_json(store.config_path(), {"brief_max_precedents": 99})
+    assert store.load_config()["brief_max_precedents"] == store.DEFAULT_CONFIG["brief_max_precedents"]
+    store.write_json(store.config_path(), {"brief_max_precedents": "many"})
+    assert store.load_config()["brief_max_precedents"] == store.DEFAULT_CONFIG["brief_max_precedents"]
+
+
+def test_lessons_survive_ledger_rotation(monkeypatch):
+    store.ensure()
+    journal = store.journal_path()
+    store.append_jsonl(journal, {"ts": "t0", "type": "decision", "text": "keep me", "tags": ["lesson"]})
+    monkeypatch.setattr(store, "LEDGER_MAX_BYTES", 400)
+    for index in range(12):
+        store.append_jsonl(
+            journal,
+            {"ts": f"n{index}", "type": "note", "text": "noise " + "x" * 120, "tags": []},
+        )
+    assert len(store.ledger_files(journal)) > 1, "the fixture must actually rotate"
+    texts = [row["text"] for row in store.read_jsonl(journal) if "lesson" in row.get("tags", [])]
+    # Copied once when its segment was dropped, not once per rotation.
+    assert texts == ["keep me"]

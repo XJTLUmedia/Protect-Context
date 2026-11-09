@@ -124,6 +124,13 @@ def test_all_tools_smoke():
     assert "PC orientation" in res["orientation"]
 
 
+def _annotations(tools, name):
+    """Tool annotations, narrowed: every shipped tool must declare them."""
+    annotations = tools[name].annotations
+    assert annotations is not None, f"{name} must ship annotations"
+    return annotations
+
+
 def test_tool_annotations_describe_reads_and_side_effects():
     from fastmcp import Client
 
@@ -135,31 +142,31 @@ def test_tool_annotations_describe_reads_and_side_effects():
 
     tools = asyncio.run(run())
     for name in READ_ONLY_TOOLS:
-        annotations = tools[name].annotations
+        annotations = _annotations(tools, name)
         assert annotations.readOnlyHint is True
         assert annotations.destructiveHint is False
         assert annotations.idempotentHint is True
         assert annotations.openWorldHint is False
 
     for name in INITIALIZING_READ_TOOLS:
-        annotations = tools[name].annotations
+        annotations = _annotations(tools, name)
         assert annotations.readOnlyHint is False
         assert annotations.destructiveHint is False
         assert annotations.idempotentHint is True
         assert annotations.openWorldHint is False
 
-    verify_annotations = tools["guard_verify"].annotations
+    verify_annotations = _annotations(tools, "guard_verify")
     assert verify_annotations.readOnlyHint is False
     assert verify_annotations.destructiveHint is True
     assert verify_annotations.idempotentHint is False
     assert verify_annotations.openWorldHint is True
 
-    note_annotations = tools["guard_note"].annotations
+    note_annotations = _annotations(tools, "guard_note")
     assert note_annotations.readOnlyHint is False
     assert note_annotations.destructiveHint is False
     assert note_annotations.openWorldHint is False
 
-    contract_annotations = tools["guard_contract"].annotations
+    contract_annotations = _annotations(tools, "guard_contract")
     assert contract_annotations.readOnlyHint is False
     assert contract_annotations.destructiveHint is True
     assert contract_annotations.openWorldHint is False
@@ -337,3 +344,25 @@ def test_guard_contract_refuses_model_driven_seed_removal():
             return _text(await client.call_tool("guard_contract", {"action": "remove", "id": m.group(1)}))
 
     assert f"removed {m.group(1)}" in asyncio.run(cleanup())
+
+
+def test_guard_note_default_tags_are_not_shared_between_calls():
+    from protect_context import journal
+    from protect_context.mcp_server import guard_note
+
+    assert "tags: agent" in guard_note("note", "alpha")
+    assert "tags: agent" in guard_note("note", "beta")
+    assert [entry["tags"] for entry in journal.recent(5)] == [["agent"], ["agent"]]
+
+
+def test_guard_evidence_reads_one_run_back_by_id():
+    from protect_context import verify
+    from protect_context.mcp_server import guard_evidence
+
+    run = verify.run_verify("definitely-missing-binary-xyz")
+    full = guard_evidence(evidence_id=run["id"])
+    assert full.startswith(f"PC verify {run['id']}")
+    assert "not found" in full, "the stored failure text must be readable again"
+    missing = guard_evidence(evidence_id="ev-9999")
+    assert "no recorded run with id ev-9999" in missing
+    assert "Nudge:" in missing

@@ -11,6 +11,7 @@ import {
   searchRows,
   searchStore,
   trustedRecallPool,
+  wordHit,
 } from "../lib/recall.ts";
 
 const journal = [
@@ -59,13 +60,29 @@ test("recall: strength then recency, with agent provenance", () => {
   assert.match(rendered.split("\n").at(-1) ?? "", /^Nudge:.*unverified/);
 });
 
-test("recall: keywords are AND and do not search tags", () => {
+test("recall: keywords rank by match count and a tag is a searchable synonym", () => {
+  // A query is a paraphrase, not an exact string: with two keywords one shared
+  // word still reaches the row, and the stronger match ranks first.
   const both = searchRows(journal, [], { query: "alpha ledger" });
-  assert.deepEqual(both.hits.map((hit) => hit.text), ["alpha lives in the ledger"]);
+  assert.deepEqual(both.hits.map((hit) => hit.text), ["alpha lives in the ledger", "alpha mentioned"]);
+  // Three or more keywords need two real matches, so one shared word is not
+  // enough to answer a longer question.
+  const narrow = searchRows(journal, [], { query: "alpha ledger missing" });
+  assert.deepEqual(narrow.hits.map((hit) => hit.text), ["alpha lives in the ledger"]);
+  // Stopwords alone carry no signal and are dropped before ranking.
+  assert.deepEqual(searchRows(journal, [], { query: "did the owner do it" }).hits, []);
+  // A tag the owner wrote is a synonym, so it is searchable and it satisfies
+  // the multi-word floor on its own.
   const tagsOnly = searchRows([{ ts: "t", type: "note", text: "nothing to see", tags: ["alpha"] }], [], {
     query: "alpha",
   });
-  assert.equal(tagsOnly.matched, 0);
+  assert.equal(tagsOnly.matched, 1);
+  const bridged = searchRows(
+    [{ ts: "t2", type: "decision", text: "prefer the broad fix", tags: ["annoyed"] }],
+    [],
+    { query: "why did the owner get annoyed" },
+  );
+  assert.equal(bridged.hits[0]?.text, "prefer the broad fix");
 });
 
 test("recall: tags are case-insensitive AND and evidence has none", () => {
@@ -203,4 +220,53 @@ test("recall: trusted pool is newest-first and skips agent and risk rows", () =>
     { ts: "5", type: "correction", text: "owner fix", tags: ["api"] },
   ]);
   assert.deepEqual(pool.map((entry) => entry.text), ["owner fix", "owner note", "owner old"]);
+});
+
+test("recall: a past command is reusable and a refused one is not", () => {
+  const events = [
+    { ts: "2026-11-01T00:00:00.000Z", kind: "tool_call", tool: "bash", cmd: "rsync -a src/ /backup/folder/" },
+    { ts: "2026-11-02T00:00:00.000Z", kind: "tool_call", tool: "bash", cmd: "rsync -a src/ /backup/folder/" },
+    { ts: "2026-11-03T00:00:00.000Z", kind: "tool_call", tool: "bash", cmd: "true", ok: false },
+    { ts: "2026-11-04T00:00:00.000Z", kind: "tool_result", tool: "bash", ok: true },
+  ];
+  const result = searchRows([], [], { query: "copy folder backup" }, events);
+  const commands = result.hits.filter((hit) => hit.kind === "command");
+  assert.equal(commands.length, 1, "one row per command family");
+  assert.equal(commands[0]?.cmd, "rsync -a src/ /backup/folder/");
+  assert.equal(commands[0]?.uses, 2);
+  assert.match(renderRecall(result), /re-run to verify/);
+  // An empty query keeps the recent-window shape: no command rows.
+  assert.equal(searchRows([], [], {}, events).hits.length, 0);
+});
+
+test("recall: a keyword must start a word", () => {
+  assert.equal(wordHit("raise the threshold", "old"), false);
+  assert.equal(wordHit("the old policy is gone", "old"), true);
+  assert.equal(wordHit("patches land", "patch"), true);
+  assert.equal(wordHit("patches land", "atch"), false);
+  const hits = searchRows(
+    [
+      { ts: "1", type: "note", text: "raise the threshold", tags: [] },
+      { ts: "2", type: "decision", text: "the old policy is gone", tags: [] },
+    ],
+    [],
+    { query: "old" },
+  );
+  assert.deepEqual(
+    hits.hits.map((hit) => hit.text),
+    ["the old policy is gone"],
+  );
+});
+
+test("recall: a read tool leaves a reusable file hint", () => {
+  const events = [
+    { kind: "tool_result", session: "s", tool: "read", cmd: "src/store.py", ok: true },
+    { kind: "tool_result", session: "s", tool: "read", cmd: "src/store.py", ok: true },
+  ];
+  const result = searchRows([], [], { query: "store.py" }, events);
+  assert.deepEqual(result.hits.map((hit) => hit.kind), ["file"]);
+  const hit = result.hits[0];
+  assert.equal(hit?.uses, 2);
+  assert.equal(hit?.tool, "read");
+  assert.match(renderRecall(result), /read · reuse · used 2×/);
 });

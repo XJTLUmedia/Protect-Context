@@ -4,9 +4,10 @@ Reduces mid-task discovery of environment problems. No network, no LLM.
 
 from __future__ import annotations
 
+import contextlib
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -18,34 +19,37 @@ TOOL_NAME_MAX = 120
 PROBE_OUTPUT_MAX_BYTES = 4096
 PROBE_TIMEOUT_S = 2.0
 PREFLIGHT_DEADLINE_S = 15.0
+PROBE_KILL_WAIT_S = 5.0  # bound the post-kill reap: an unkillable child must not hang the call
 
 
 def _terminate_probe(process: subprocess.Popen) -> None:
+    """Best-effort kill of the probe and, on POSIX, its whole process group."""
     if os.name == "posix":
-        try:
+        with contextlib.suppress(OSError):
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            # The group kill reached the child, so the fallback below is moot.
             return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    try:
+    with contextlib.suppress(OSError):
         process.kill()
-    except OSError:
-        pass
 
 
 def _probe(argv: list[str], timeout_s: float) -> tuple[int | None, str, bool]:
     """Run a bounded probe without retaining arbitrary child output in RAM."""
     if timeout_s <= 0:
         return None, "", True
-    popen_kwargs = {"start_new_session": True} if os.name == "posix" else {}
     with tempfile.TemporaryFile() as output:
         try:
-            process = subprocess.Popen(
-                argv,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                **popen_kwargs,
-            )
+            if os.name == "posix":
+                process = subprocess.Popen(
+                    argv,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            else:
+                process = subprocess.Popen(
+                    argv, stdout=output, stderr=subprocess.STDOUT
+                )
         except OSError:
             return None, "", False
         timed_out = False
@@ -54,7 +58,10 @@ def _probe(argv: list[str], timeout_s: float) -> tuple[int | None, str, bool]:
         except subprocess.TimeoutExpired:
             timed_out = True
             _terminate_probe(process)
-            process.wait()
+            # Bound the reap: an unkillable child (e.g. stuck in D-state) must
+            # not block the tool call; the OS reaps it whenever it can.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=PROBE_KILL_WAIT_S)
         output.seek(0)
         raw = output.read(PROBE_OUTPUT_MAX_BYTES)
     text = raw.decode("utf-8", errors="replace")
@@ -86,7 +93,7 @@ def in_git_repo(timeout_s: float = PROBE_TIMEOUT_S) -> bool:
 
 
 def run_preflight(cfg: dict | None = None) -> dict:
-    cfg = cfg if cfg is not None else _load_config()
+    cfg = cfg if cfg is not None else store.load_config()
     tools = []
     probe_issues: list[str] = []
     configured = cfg.get("preflight_tools", [])
@@ -116,10 +123,6 @@ def run_preflight(cfg: dict | None = None) -> dict:
         "omitted_tools": max(0, len(configured) - PREFLIGHT_TOOLS_MAX),
         "probe_issues": probe_issues,
     }
-
-
-def _load_config() -> dict:
-    return store.load_config()
 
 
 def render(res: dict) -> str:

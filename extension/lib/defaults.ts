@@ -25,6 +25,8 @@ export interface GuardConfig {
   diff_warn_files: number;
   ctx_warn_pct: number;
   brief_mode: "changed" | "always";
+  /** How many `lesson` precedents the brief re-injects (0 disables it). */
+  brief_max_precedents: number;
   risk_confirm: boolean;
   preflight_tools: string[];
 }
@@ -119,6 +121,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
   diff_warn_files: 10,
   ctx_warn_pct: 70,
   brief_mode: "changed",
+  brief_max_precedents: 3,
   risk_confirm: true,
   preflight_tools: ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
 };

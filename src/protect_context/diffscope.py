@@ -78,7 +78,7 @@ def normalize_repo_relpath(path: str) -> str:
 def _git_bytes(args: list[str], *, stdin: bytes | None = None) -> bytes:
     try:
         r = subprocess.run(
-            ["git", *args], input=stdin, capture_output=True, timeout=15
+            ["git", *args], input=stdin, capture_output=True, timeout=15, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as e:  # pragma: no cover — rare
         raise DiffError(f"git failed: {e}") from e
@@ -300,7 +300,9 @@ def verdict(st: dict, cfg: dict) -> str:
 def diff_audit(baseline: str | None = None, cfg: dict | None = None) -> dict:
     """Diff working tree vs baseline (default HEAD); returns stats + verdict,
     or {"error": ...} if git fails (never raises to callers)."""
-    cfg = cfg if cfg is not None else store.load_config()
+    # A caller may pass a partial cfg (tests, integrations): missing keys fall
+    # back to the built-in defaults instead of raising KeyError below.
+    cfg = {**store.DEFAULT_CONFIG, **(cfg if cfg is not None else store.load_config())}
     try:
         root = _repo_root()
         unborn = False

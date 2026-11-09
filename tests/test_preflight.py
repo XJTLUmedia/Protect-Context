@@ -49,3 +49,16 @@ def test_preflight_tool_list_and_names_are_bounded():
     assert res["omitted_tools"] == 10
     assert "+10 configured entries omitted" in text
     assert text.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_probe_bounded_after_kill():
+    """A hung tool must not wedge the caller: kill, then reap for at most
+    PROBE_KILL_WAIT_S instead of waiting forever."""
+    import time
+
+    started = time.monotonic()
+    code, text, timed_out = preflight._probe(["/bin/sh", "-c", "sleep 30"], 0.2)
+    elapsed = time.monotonic() - started
+
+    assert (code, text, timed_out) == (None, "", True)
+    assert elapsed < 5, "the post-kill wait must be bounded"

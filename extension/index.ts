@@ -55,6 +55,7 @@ import {
   recentAgentEntries,
   recentJournal,
   renderJournal,
+  sanitizeTags,
   tagsWithRequired,
   trustedEntries,
 } from "./lib/journal.ts";
@@ -84,6 +85,7 @@ import {
   digestOf,
   loopKey,
   nextEvidenceId,
+  outcomeLabel,
   readVerifyRuns,
   readVerifyRowsForIds,
   renderVerifyReport,
@@ -115,7 +117,21 @@ export default function (pi: ExtensionAPI) {
     brief_digest: null,
     notify_watermarks: { ctx_pct: 0, diff_lines: 0, diff_files: 0 },
   };
-  const startTimes = new Map<string, { start: number; tool: string; cmd: string | null }>();
+  /**
+ * Reuse key for a non-bash tool call: the first path/pattern-ish argument, so
+ * recall can answer "where did I read this before" instead of re-deriving it.
+ */
+function reuseKeyOf(args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const record = args as Record<string, unknown>;
+  for (const key of ["path", "filePath", "file", "pattern", "query", "cmd", "command"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") return normalizeCommand(value);
+  }
+  return null;
+}
+
+const startTimes = new Map<string, { start: number; tool: string; cmd: string | null }>();
   let lastDiff = { lines: 0, files: 0, available: false, lowerBound: false };
   let lastCtxPct: number | null = null;
   // Mid-run re-injection (SPEC §5): a threshold/overflow compaction retries the
@@ -589,12 +605,28 @@ export default function (pi: ExtensionAPI) {
       contract: contract.constraints,
       // Full lists, not a pre-slice: buildBrief owns the display caps and
       // reports exactly how many entries those caps hid.
+      // Durable precedents (`lesson` tag) are re-shown every turn, ahead of the
+      // recent caps, so a lesson the owner already paid for cannot rotate out.
+      precedents: [...journal].reverse().filter((entry) => sanitizeTags(entry.tags).includes("lesson")),
+      precedentsCap: cfg.brief_max_precedents,
       decisions: trustedEntries(journal, "decision"),
       corrections: trustedEntries(journal, "correction"),
-      agentNotes: recentAgentEntries(journal, journal.length),
+      // Corrections the model wrote are never authority, but they are the
+      // record of what the owner corrected; show them in their own slot so
+      // they are not starved by newer ordinary notes.
+      unverifiedCorrections: recentAgentEntries(journal, journal.length).filter(
+        (entry) => entry.type === "correction",
+      ),
+      agentNotes: recentAgentEntries(journal, journal.length).filter(
+        (entry) => entry.type !== "correction",
+      ),
       recallPool: trustedRecallPool(journal),
       loops,
-      lastEvidence: last ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms } : null,
+      // The trust label travels with the id: a masked exit 0 must not read
+      // like a clean run on the one line that anchors evidence-before-success.
+      lastEvidence: last
+        ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms, label: outcomeLabel(last) }
+        : null,
     });
   }
 
@@ -773,6 +805,8 @@ export default function (pi: ExtensionAPI) {
       if (event.toolName === "bash") {
         const command = (event.args as { command?: unknown } | undefined)?.command;
         if (typeof command === "string") cmd = normalizeCommand(command);
+      } else {
+        cmd = reuseKeyOf(event.args);
       }
       startTimes.set(event.toolCallId, { start: Date.now(), tool: event.toolName, cmd });
     } catch {
@@ -800,6 +834,12 @@ export default function (pi: ExtensionAPI) {
       let cmd: string | null = null;
       let exit: number | null = null;
       let ok: boolean | null = !event.isError;
+      if (event.toolName !== "bash") {
+        // A file/read/search call still leaves a trail worth reusing: "you read
+        // this before, start there". The key is a path or pattern, never a
+        // shell command, so loops.py/loops.ts keep it out of streak arithmetic.
+        cmd = meta?.cmd ?? null;
+      }
       if (event.toolName === "bash") {
         cmd = meta?.cmd ?? null;
         if (event.isError) {

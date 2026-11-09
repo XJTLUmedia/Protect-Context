@@ -275,7 +275,7 @@ contract:
 …
 decisions:
 - Use the atomic-mkdir lease, not fcntl alone; Python must interoperate with the extension. [locking,spec]
-last verify: ev-0005 exit=0 'npm run check' 1.4s
+last verify: ev-0005 exit=0 ok 'npm run check' 1.4s
 ```
 
 And the always-on one-line widget:
@@ -325,6 +325,7 @@ Model-callable tools:
 |---|---|---|
 | `guard_verify` | `command`, `timeout_s` (default 180, clamped 1–900) | Records `ev-NNNN`; refusal on a blocked loop |
 | `guard_note` | `type`, `text`, optional `tags` | Forced to the `agent` trust level |
+| `guard_evidence` | `limit` (default 5), optional `evidence_id` | Read-only; the window shows each non-ok row's last output line, and `evidence_id` returns one run in full |
 | `guard_journal` | `limit` (0–20, default 5), optional `type` | Read-only; recovers decisions, corrections, and the agent's own earlier notes after a compaction |
 | `guard_recall` | `query`, `type`, `tags` (AND), `limit` (0–20, default 5), `evidence_id`, `cmd` | Read-only scan of the retained window; hits labelled `trusted` or `agent` |
 | `guard_contract_check` | `summary` | Deterministic keyword coverage checklist, never a proof |
@@ -385,6 +386,7 @@ out-of-range values fall back to the frozen default.
 | `diff_warn_files` | `10` | Changed-file warning threshold |
 | `ctx_warn_pct` | `70` | First context-usage warning watermark |
 | `brief_mode` | `"changed"` | Inject only when the brief digest changes; `"always"` injects every turn |
+| `brief_max_precedents` | `3` | `lesson` precedents re-injected per brief (0–10; `0` disables the section) |
 | `risk_confirm` | `true` | Ask once before a matching risky pi bash command when UI is available |
 | `preflight_tools` | `git`, `python3`, `pip`, `node`, `npm`, `rg`, `pytest` | Executables checked by preflight |
 
@@ -477,7 +479,8 @@ deliberately narrow, so benign lookalikes stay silent:
 Runtime files stay in the frozen `.agent-guard/` layout and are gitignored:
 
 `config.json` · `contract.json` · `journal.jsonl` · `events.jsonl` ·
-`verify_runs.jsonl` · `state.json`
+`verify_runs.jsonl` · `state.json` · `verify_count.json` (a stamp-verified
+evidence-count sidecar, discarded rather than trusted when the ledger moves)
 
 The optional personal layer lives outside the repository at
 `~/.config/protect-context/` (`contract.json`, `config.json`) and is never
@@ -488,7 +491,10 @@ Ledgers bound themselves instead of growing forever: once `events.jsonl`,
 `<name>.1.jsonl`, keeping at most three rotated segments and dropping the oldest.
 Reads concatenate the segments oldest-first, so recent rows and the highest
 evidence id always survive; `budget` and loop streaks describe the retained
-window. Session baselines are keyed per session inside `state.json`, so parallel
+window. Rotation is lesson-aware: `journal` rows tagged `lesson` are carried
+into the fresh live file when their segment is dropped, so a durable precedent
+cannot be deleted by size-based rotation (each lesson is copied once, and a
+copy that somehow fails never breaks the append that triggered the rotation). Session baselines are keyed per session inside `state.json`, so parallel
 pi sessions in one repo no longer overwrite each other's watermarks.
 
 Python and TypeScript use the same atomic-directory lease at
@@ -556,8 +562,11 @@ its own failure mode. Within the frozen 12-line constraint cap:
 
 An agent-authored constraint therefore cannot crowd out a seed. Below the
 contract it carries up to 3 recent trusted decisions, up to 3 trusted
-corrections, up to 2 unverified agent notes, up to 2 open loops, and the last
-evidence ID with its exit code, duration, and a truncated command. When a cap
+corrections, up to 2 unverified corrections, up to 2 unverified agent notes,
+up to 2 open loops, and the last evidence ID with its trust label (`ok`,
+`FAIL`, `UNTRUSTED`), exit code, duration, and a truncated command. Corrections
+the model wrote get their own unverified slot so a newer ordinary note cannot
+starve the record of what the owner corrected. When a cap
 hides journal entries, the brief points at `guard_recall`. If the owner task's
 words match a tag on a trusted entry that did not fit, it also injects at most
 two of those matches. `brief_mode: "changed"` (default) injects only when the
@@ -610,9 +619,11 @@ tail stays readable.
 Loop detection still stores the frozen fingerprint (whitespace collapsed,
 nothing else). The streak key also ignores a trailing `;` outside quotes and a
 trailing failure mask, so `pytest -q;` and `npm test || true` count as the
-same command as `pytest -q` and `npm test`. A masked exit 0 does not reset the
-streak. At `loop_block_after` the attempt is refused, with the prior failure
-count and a change-strategy nudge.
+same command as `pytest -q` and `npm test`. An unproven exit 0 — a failure
+mask, or a pipeline that never checked its earlier stages — does not reset the
+streak; it counts as one more attempt, so masking repeatedly cannot walk a
+command back under the threshold. At `loop_block_after` the attempt is
+refused, with the prior failure count and a change-strategy nudge.
 
 ![Verification workflow: run a command, persist its evidence, and cite the result. With the default threshold, two failures of the same normalized command block its third attempt; only that command succeeding resets its streak](./docs/images/evidence-loop.svg)
 
@@ -629,13 +640,63 @@ total, and stop once the hard line threshold is known. A truncated scan is
 reported as a bounded scan, promoted to at least a warning (CLI exit `1`), and
 its count treated as a lower bound — the widget renders it as `Δ≥`.
 
+### Precedents and satisfaction
+
+Recording is not the same as remembering. Two conventions make a journal entry
+reusable instead of merely stored:
+
+- A `lesson` needs trigger words you would actually search: `guard_note` says
+  so when a `lesson` carries no tag outside the generic set, because a lesson
+  whose only tag is `lesson` is reachable by nothing but its own wording.
+- Tag an entry `lesson` and it becomes a **precedent**: the brief re-injects it
+  under `precedents:`, ahead of the recent `decisions:` and
+  `agent notes (unverified):` caps, so a lesson the owner already paid for
+  cannot be pushed out by newer session chatter. Precedents are ranked by how
+  much of the current task they answer, then by recency, and the cap is
+  `brief_max_precedents` in `config.json` (default 3, 0 disables the section).
+  Keep each to one actionable sentence — "when a review lists N follow-ups,
+  take all N" — because it is re-sent every turn.
+- Tag a correction `satisfied` or `dissatisfied` to record how the owner
+  reacted to a decision, plus the action that produced that reaction. The next
+  similar situation then starts from the outcome instead of re-litigating it.
+  These two words are a fixed vocabulary: a near-miss such as `dissatisfed` is
+  normalized on write and reported in the acknowledgement, so owner feedback
+  cannot silently decay into an ordinary tag.
+
+Recall is paraphrase-tolerant rather than exact-string: common stopwords are
+dropped, **tags are searched as synonyms**, and hits are weighted by rarity, so
+a word that appears in every entry cannot outvote the one word that answers the
+question. "why did the owner get annoyed?" therefore reaches a lesson tagged
+`annoyed` even though the text says "prefers the broad fix" — the tag is the
+owner's own word, written once and reused forever. One tag match also satisfies
+the multi-word floor on its own; otherwise a three-or-more-word query needs two
+real matches so a single shared word cannot answer a long question.
+
+Matching is word-boundary aware: `old` no longer hits `threshold` or `search`,
+while a prefix still finds its own inflections (`patch` → `patches`).
+
+When a query is given, past successful `bash` commands from `events.jsonl` join
+the hits as `command · re-run to verify · ran N× · last ok exit 0` rows at half
+weight — a repeated chore ("copy these to that folder") starts from the command
+that already worked instead of being re-derived, and the row carries the
+outcome the command last had, because a command that ran is not a command that
+still works. A family whose last observed run failed is demoted and labelled
+`last FAILED — change it before reuse`; refused or declined calls are never
+reused. Non-shell tools leave their own trail: a `read`/`edit`/search call
+records the path or pattern it touched, so the same query also returns
+`read · reuse · used 2× · <path>` hints — "you were here before" instead of
+re-deriving where the code lives. Those keys are paths, never commands, and only
+`bash` and `guard_verify` rows may form a loop streak, so a hint can never be
+blocked as a repeated failure.
+
 ### Trust and provenance
 
 Direct CLI and pi slash-command contract writes are treated as owner input.
 MCP/model journal writes are forcibly tagged `agent`: they never enter the
 trusted `decisions:`/`corrections:` sections. They are not discarded either —
-the brief shows the newest two under `agent notes (unverified):`, clearly
-labelled and capped shorter than trusted text, and `guard_journal` returns the
+the brief shows the newest two under `corrections (unverified):` when they
+are corrections, else `agent notes (unverified):`, clearly labelled and capped
+shorter than trusted text, and `guard_journal` returns the
 full stored entry. That keeps the model's own reasoning recoverable after a
 compaction without granting it authority. CLI and pi slash-command journal
 entries are trusted. Untagged
@@ -690,9 +751,9 @@ instead of leaving stale numbers in this README.
 | `Δ?` in the widget | Not a Git worktree, so no diff baseline | Run inside a repository, or use the CLI with an explicit `--baseline` |
 | `Δ≥` in the widget | Bounded untracked scan hit a cap | Treat the count as a lower bound; narrow the scan or review scope manually |
 | Loop never blocks | Commands differ by flags or paths. A trailing semicolon or an or-true failure mask shares a streak; other edits do not | Compare with `loops` / `guard_loop_check`. Change the command for real — do not mask the failure |
-| Verify says UNTRUSTED, or CLI verify exits 1 after exit 0 | The shell status is only the last stage of a pipeline, or the command forces success with `true` | Re-run with `set -o pipefail` and without the mask. Do not cite that evidence id |
+| Verify says UNTRUSTED, or CLI verify exits 1 after exit 0 | The shell status is only the last stage of a pipeline, or the command forces success with `true` | Re-run without the mask. For a pipeline the tool returns the exact rewrite to paste (`bash -o pipefail -c '<command>'`). Do not cite that evidence id |
 | Verify timed out, or an MCP session stalled on an old build | The command waited on stdin, or it exceeded timeout_s (clamped to 1–900, recorded as exit 124) | Current builds close stdin. Fix the hang or pass a larger `timeout_s` |
-| Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes, 120 chars each | Read the full entry with `guard_journal`, or search tags and evidence with `guard_recall` |
+| Agent forgot its own earlier decision after a compaction | The brief shows only the newest 2 agent notes (plus 2 unverified corrections), 120 chars each | Read the full entry with `guard_journal`, or search tags and evidence with `guard_recall` |
 | No guard block after an automatic compaction | Host emits no `context` event, so mid-run re-assertion cannot run | It returns at the next user prompt; check the host supports the `context` hook |
 | `task:` line is wrong or missing | Auto-capture ignores short prompts and slash commands, and an owner task always wins | Set it explicitly with `/guard-task <text>` or `/guard-task --clear` |
 | `PC_SESSION_ID` changes nothing in evidence | It scopes ledger *views*, not `state.json` | Expected: state is project-global by design |
@@ -735,7 +796,8 @@ instead of leaving stale numbers in this README.
 #### Determinism
 
 - The frozen brief carries at most 12 constraints, 3 trusted decisions, 3
-  trusted corrections, and 2 agent notes, plus at most 2 trusted tag matches
+  trusted corrections, 2 unverified corrections, and 2 agent notes, plus at
+  most 2 trusted tag matches
   when the owner task names a journal tag the caps hid. Overflow is visible
   (each section announces what it hid) and points at `guard_journal` and
   `guard_recall`, but hidden entries are not enforced by context injection.
@@ -755,7 +817,7 @@ instead of leaving stale numbers in this README.
   arms a `context` hook on `session_compact` and re-asserts the block on every
   request until a persisted one is back in the conversation. On a host that
   does not emit `context`, the block returns at the next user prompt instead.
-- Task capture stores the first substantive prompt (≤200 chars) in
+- Task capture stores the first substantive prompt (≤400 chars) in
   `.agent-guard/state.json`. That is conversation content: it stays local and
   gitignored, but review it before sharing a store, and clear it with
   `/guard-task --clear`.

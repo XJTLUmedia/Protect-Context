@@ -11,9 +11,24 @@ import unicodedata
 
 from . import store
 
+LESSON_TAG = "lesson"
+# Owner satisfaction is recorded as convention, so a typo would silently become
+# an ordinary tag. These two are the only spellings that mean anything.
+SATISFACTION_TAGS = ("satisfied", "dissatisfied")
+# Tags that say nothing about when a lesson applies: a lesson carrying only
+# these is unreachable by any paraphrase but its own wording.
+GENERIC_TAGS = frozenset(
+    ("lesson", "agent", "decision", "note", "correction", "risk", "protect-context")
+)
+
 NUDGE_BY_TYPE = {
     "decision": "Nudge: re-read journal decisions before resuming work.",
-    "correction": "Nudge: check logged corrections before doing similar work.",
+    # Agent-written corrections are re-injected as unverified, never authority;
+    # only the owner's own /guard-note entry becomes trusted (contract 07).
+    "correction": (
+        "Nudge: check logged corrections before doing similar work. "
+        "This entry stays unverified — the owner promotes one with /guard-note."
+    ),
     "risk": "Nudge: logged risks should drive preflight and risk confirms.",
     "note": "Nudge: the journal persists across restarts — build on it.",
 }
@@ -93,40 +108,98 @@ def _bounded_limit(limit: int) -> int:
     return max(0, min(int(limit), READ_LIMIT_MAX))
 
 
+def _within_one_edit(left: str, right: str) -> bool:
+    """True when the two strings differ by at most one edit (Levenshtein)."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(1 for a, b in zip(left, right, strict=True) if a != b) == 1
+    short, long = (left, right) if len(left) < len(right) else (right, left)
+    index = 0
+    while index < len(short) and short[index] == long[index]:
+        index += 1
+    return short[index:] == long[index + 1 :]
+
+
+def _fix_satisfaction_tags(tags: list[str], notes: list[str]) -> list[str]:
+    """Normalize near-miss `satisfied`/`dissatisfied` tags and say so."""
+    fixed: list[str] = []
+    for tag in tags:
+        match = next((want for want in SATISFACTION_TAGS if _within_one_edit(tag.casefold(), want)), None)
+        if match is not None and tag != match:
+            notes.append(f"tag {tag!r} normalized to {match!r} (owner satisfaction is a fixed word)")
+            tag = match
+        if tag not in fixed:
+            fixed.append(tag)
+    return fixed
+
+
+def _note_lesson_triggers(jtype: str | None, tags: list[str], notes: list[str]) -> None:
+    """Warn when a lesson carries no word a future query could plausibly use."""
+    if LESSON_TAG not in {tag.casefold() for tag in tags}:
+        return
+    if any(tag.casefold() not in GENERIC_TAGS for tag in tags):
+        return
+    notes.append(
+        "this lesson has no trigger tag, so only its own wording will find it — "
+        "add the owner's words (e.g. tags=['annoyed', 'narrow-patch'])"
+    )
+
+
 def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
     """Append a cleaned journal entry; reject unknown types and blank text."""
     _validate_type(jtype)
     clean_text = _normalise_text(text, TEXT_CAP)
     if not clean_text:
         raise ValueError("journal text must not be blank")
+    notes: list[str] = []
+    clean_tags = _fix_satisfaction_tags(_normalise_tags(tags), notes)
+    _note_lesson_triggers(jtype, clean_tags, notes)
     entry = {
         "ts": store.now_ts(),
         "type": jtype,
         "text": clean_text,
-        "tags": _normalise_tags(tags),
+        "tags": clean_tags,
     }
-    return store.append_jsonl(store.journal_path(), entry)
+    # The row is written with the frozen four keys only; display notes are
+    # attached to the returned copy afterwards, so they never reach disk.
+    stored = dict(entry)
+    store.append_jsonl(store.journal_path(), stored)
+    if notes:
+        entry["ack_notes"] = notes
+    return entry
+
+
+def _filtered(jtype: str | None) -> list[dict]:
+    """Every entry of one validated type (or every entry)."""
+    _validate_type(jtype)
+    entries = store.read_jsonl(store.journal_path())
+    if jtype is None:
+        return entries
+    return [entry for entry in entries if entry.get("type") == jtype]
+
+
+def recent_with_total(
+    limit: int = READ_LIMIT_DEFAULT, jtype: str | None = None
+) -> tuple[list[dict], int]:
+    """``(slice, total)`` from ONE ledger read: every journal view shows both."""
+    entries = _filtered(jtype)
+    bounded = _bounded_limit(limit)
+    if bounded == 0:
+        return [], len(entries)
+    return entries[-bounded:], len(entries)
 
 
 def recent(limit: int = READ_LIMIT_DEFAULT, jtype: str | None = None) -> list[dict]:
     """Return a bounded recent slice, oldest first, optionally by type."""
-    _validate_type(jtype)
-    entries = store.read_jsonl(store.journal_path())
-    if jtype is not None:
-        entries = [entry for entry in entries if entry.get("type") == jtype]
-    bounded = _bounded_limit(limit)
-    if bounded == 0:
-        return []
-    return entries[-bounded:]
+    return recent_with_total(limit, jtype)[0]
 
 
 def count(jtype: str | None = None) -> int:
     """Count all entries, or only entries of one validated journal type."""
-    _validate_type(jtype)
-    entries = store.read_jsonl(store.journal_path())
-    if jtype is not None:
-        entries = [entry for entry in entries if entry.get("type") == jtype]
-    return len(entries)
+    return len(_filtered(jtype))
 
 
 def render_ack(entry: dict, total: int) -> str:
@@ -135,7 +208,11 @@ def render_ack(entry: dict, total: int) -> str:
     tags = _normalise_tags(entry.get("tags"))
     tag_s = (" · tags: " + ", ".join(tags)) if tags else ""
     nudge = NUDGE_BY_TYPE.get(jtype, "Nudge: review the journal before resuming work.")
-    return f"logged {jtype or 'entry'} #{total}{tag_s}\n{nudge}"
+    notes = entry.get("ack_notes")
+    head = f"logged {jtype or 'entry'} #{total}{tag_s}"
+    if isinstance(notes, list) and notes:
+        head += "".join(f"\nnote: {store.display_text(note, 200)}" for note in notes)
+    return f"{head}\n{nudge}"
 
 
 def render_recent(entries: list[dict], total: int, jtype: str | None = None) -> str:

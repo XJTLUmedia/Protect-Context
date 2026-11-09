@@ -79,15 +79,17 @@ def _children(d: Path) -> str:
         entries = sorted(d.iterdir(), key=lambda p: p.name.lower())
     except OSError:
         return ""
-    names = []
+    names: list[str] = []
+    visible = 0
     for e in entries:
         if _skip(e.name):
             continue
+        visible += 1
+        if len(names) >= MAX_CHILDREN:
+            continue
         shown = _display(e.name)
         names.append(shown + ("/" if e.is_dir() and not e.is_symlink() else ""))
-        if len(names) >= MAX_CHILDREN:
-            break
-    remaining = max(0, len([e for e in entries if not _skip(e.name)]) - len(names))
+    remaining = max(0, visible - len(names))
     s = ", ".join(names)
     if remaining > 0:
         s += f", +{remaining} more"

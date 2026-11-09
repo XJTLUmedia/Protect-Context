@@ -4,6 +4,7 @@ import {
   clampTimeoutS,
   digestOf,
   failureMasked,
+  pipefailRewrite,
   formatVerifyLine,
   loopKey,
   nextEvidenceId,
@@ -109,4 +110,16 @@ test("verify: long commands are truncated in compact lines", () => {
   });
   assert.ok(!line.includes("z".repeat(300)), "unbounded cmd leaked into evidence line");
   assert.ok(line.includes("…"), "truncation marker present");
+});
+
+test("verify: a piped command gets an exact bash-pipefail rewrite", () => {
+  assert.equal(pipefailRewrite("pytest -q | tail -3"), "bash -o pipefail -c 'pytest -q | tail -3'");
+  assert.equal(pipefailRewrite("a | b"), "bash -o pipefail -c 'a | b'");
+  // Nothing to rewrite: already pipefail, no pipe, or a mask (which needs removal).
+  assert.equal(pipefailRewrite("bash -o pipefail -c 'a | b'"), "");
+  assert.equal(pipefailRewrite("pytest -q"), "");
+  assert.equal(pipefailRewrite("pytest -q || true"), "");
+  assert.equal(pipefailRewrite(null), "");
+  // Quotes inside the command survive the rewrite.
+  assert.equal(pipefailRewrite("echo 'a|b' | tail -1"), String.raw`bash -o pipefail -c 'echo '\''a|b'\'' | tail -1'`);
 });

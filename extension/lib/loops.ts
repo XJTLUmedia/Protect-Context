@@ -5,7 +5,7 @@
 
 import type { EventRecord } from "./events.ts";
 import { normalizeOneLine } from "./text.ts";
-import { failureMasked, loopKey, type VerifyRun } from "./verify.ts";
+import { failureMasked, loopKey, trustIssues, type VerifyRun } from "./verify.ts";
 
 export interface LoopInfo {
   cmd: string;
@@ -19,6 +19,8 @@ interface LoopOutcome {
   ok: boolean | null;
   exit: number | null;
   order: number;
+  /** exit 0 that proves nothing (pipeline or mask) on a guard_verify run. */
+  unproven?: boolean;
 }
 
 function timestampMillis(value: string): number | null {
@@ -43,13 +45,15 @@ function compareOutcomes(a: LoopOutcome, b: LoopOutcome): number {
 function applyOutcome(map: Map<string, LoopInfo>, outcome: LoopOutcome): void {
   const cmd = loopKey(outcome.cmd);
   if (cmd === "") return;
-  if (outcome.ok === true) {
-    // `|| true` / `; true` exits 0 without proving the command. Leaving the
-    // streak in place keeps that mask from disarming the loop brake.
-    if (!failureMasked(outcome.cmd)) map.delete(cmd);
+  // `|| true` / `; true` exits 0 without proving the command, and neither does
+  // a pipeline that never checked its earlier stages. Both are unproven
+  // attempts, not resets: they count like failures and keep the brake armed
+  // (Python loops.streaks applies the same rule).
+  if (outcome.ok === true && !outcome.unproven && !failureMasked(outcome.cmd)) {
+    map.delete(cmd);
     return;
   }
-  if (outcome.ok !== false) return;
+  if (outcome.ok !== true && outcome.ok !== false) return;
   const cur = map.get(cmd) ?? { cmd, failures: 0, lastExit: null };
   cur.failures += 1;
   if (outcome.exit !== null) cur.lastExit = outcome.exit;
@@ -83,6 +87,9 @@ export function failedAttempts(events: EventRecord[], session: string): Map<stri
  * guard_verify writes the evidence ledger rather than events.jsonl, so using
  * events alone forgets its failures after a restart. Session scoping is
  * applied before merging; older sessions can never affect the new one. */
+/** Tools whose runs may accumulate a streak; everything else only feeds recall. */
+const STREAK_TOOLS = new Set(["bash", "guard_verify"]);
+
 export function failedAttemptsFromLedgers(
   events: EventRecord[],
   runs: VerifyRun[],
@@ -92,6 +99,9 @@ export function failedAttemptsFromLedgers(
   let order = 0;
   for (const event of events) {
     if (event.kind !== "tool_result" || event.session !== session || typeof event.cmd !== "string" || event.cmd === "") continue;
+    // Other tools record a reuse key (a path or pattern) in `cmd` so recall can
+    // point back at it. That key is not a command: it must never form a streak.
+    if (typeof event.tool === "string" && event.tool !== "" && !STREAK_TOOLS.has(event.tool)) continue;
     outcomes.push({
       ts: typeof event.ts === "string" ? event.ts : "",
       cmd: event.cmd,
@@ -108,6 +118,7 @@ export function failedAttemptsFromLedgers(
       ok: typeof run.ok === "boolean" ? run.ok : null,
       exit: typeof run.exit === "number" && Number.isFinite(run.exit) ? run.exit : null,
       order: order++,
+      unproven: run.ok === true && trustIssues(run.cmd).length > 0,
     });
   }
   outcomes.sort(compareOutcomes);

@@ -25,6 +25,11 @@ from datetime import datetime, timezone
 from . import store, verify
 
 
+# Tools whose runs may accumulate a streak. Everything else only records a
+# reuse key for recall.
+STREAK_TOOLS = frozenset(("bash", "guard_verify"))
+
+
 def _timestamp_key(value: object, position: int) -> tuple:
     """Chronological key for JS/Python ISO timestamps, including legacy rows.
 
@@ -63,6 +68,9 @@ def _verify_outcomes(session: str) -> list[dict]:
                 "ok": r["ok"],
                 "cmd": cmd,
                 "exit": r.get("exit"),
+                # exit 0 that proves nothing (pipeline or failure mask) is an
+                # unproven attempt: the streak must see it, not shrug at it.
+                "unproven": r["ok"] is True and bool(verify.trust_issues(cmd)),
             }
         )
     return out
@@ -89,6 +97,13 @@ def streaks(events: list[dict] | None = None, session: str | None = None) -> lis
     for e in events:
         if e.get("session") != session or e.get("kind") != "tool_result":
             continue
+        # Only shell runs and the evidence tool can form a streak. Other tools
+        # now record a reuse key in `cmd` (a path or pattern) so recall can
+        # surface "you read this before"; that key is not a command and must
+        # never be blocked.
+        tool = e.get("tool")
+        if isinstance(tool, str) and tool and tool not in STREAK_TOOLS:
+            continue
         cmd = e.get("cmd")
         if not isinstance(cmd, str) or not cmd:
             continue
@@ -97,11 +112,17 @@ def streaks(events: list[dict] | None = None, session: str | None = None) -> lis
         if not cmd:
             continue
         ok = e.get("ok")
-        if ok is False:
+        # A masked exit 0 (`cmd || true`) or a pipeline that never checked its
+        # earlier stages is an unproven attempt, not a success: it counts like a
+        # failure so masking cannot disarm the brake. Only a trusted success
+        # resets the streak; ok None (unknown) leaves it alone.
+        unproven = bool(e.get("unproven")) or (
+            ok is True and verify.failure_masked(e.get("cmd") or "")
+        )
+        if ok is False or unproven:
             current[cmd] = current.get(cmd, 0) + 1
-        elif ok is True and not verify.failure_masked(e.get("cmd") or ""):
+        elif ok is True:
             current.pop(cmd, None)
-        # ok None (unknown), or a masked exit 0, leaves the streak untouched
     out = [{"cmd": cmd, "count": n} for cmd, n in current.items() if n > 0]
     out.sort(key=lambda s: (-s["count"], s["cmd"]))
     return out
