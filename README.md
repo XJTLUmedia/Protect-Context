@@ -21,9 +21,15 @@ visible *before* they cost you a session.
   <img alt="runtime dependencies: zero" src="https://img.shields.io/badge/npm%20runtime%20deps-0-success">
 </p>
 
+<p align="center">
+  <a href="https://cursor.com/en/install-mcp?name=protect-context&amp;config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwcm90ZWN0LWNvbnRleHQiLCJtY3AiXX0%3D"><picture><source media="(prefers-color-scheme: dark)" srcset="https://cursor.com/deeplink/mcp-install-dark.svg"><img alt="Add protect-context to Cursor" src="https://cursor.com/deeplink/mcp-install-light.svg"></picture></a>
+  <a href="https://vscode.dev/redirect/mcp/install?name=protect-context&amp;config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22protect-context%22%2C%22mcp%22%5D%7D"><img alt="Install protect-context in VS Code" src="https://img.shields.io/badge/VS_Code-Install_MCP-0098FF?logo=visualstudiocode&logoColor=white"></a>
+  <a href="https://insiders.vscode.dev/redirect/mcp/install?name=protect-context&amp;config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22protect-context%22%2C%22mcp%22%5D%7D&amp;quality=insiders"><img alt="Install protect-context in VS Code Insiders" src="https://img.shields.io/badge/VS_Code_Insiders-Install_MCP-24bfa5?logo=visualstudiocode&logoColor=white"></a>
+</p>
+
 ![protect-context injects a session brief — contract, decisions, corrections, loops, last evidence — before the agent starts working](./preview.png)
 
-<!-- demo-gif-placeholder: replace this comment with a real 15–25s demo GIF (status, unevidenced done, verify, loop brake, widget). Do not link or commit a stand-in image. -->
+![Terminal recording of guard_verify: two failures of false, the third attempt blocked, then a masked || true exit 0 labelled UNTRUSTED](./docs/assets/demo.gif)
 
 One project-local `.agent-guard/` store · three interfaces backed by the same
 logic:
@@ -51,6 +57,7 @@ change is correct. [`SPEC.md`](./SPEC.md) is the frozen v1.0 contract.
     - [From a checkout](#from-a-checkout)
   - [Install the Python CLI](#install-the-python-cli)
   - [From source](#from-source)
+- [See it work](#see-it-work)
 - [A 30-second tour](#a-30-second-tour)
 - [Interface comparison](#interface-comparison)
 - [Reference](#reference)
@@ -213,6 +220,20 @@ checks in the same file at the root:
 Set `"env": { "PC_SESSION_ID": "my-session" }` when several host sessions share
 one repo and need separate evidence and loop views.
 
+The same `uvx protect-context mcp` command, with each host's current config
+path, is copied in full under [`docs/integrations/`](./docs/integrations):
+
+- [Cursor](./docs/integrations/cursor.md)
+- [Claude Code](./docs/integrations/claude-code.md)
+- [VS Code (Copilot agent mode)](./docs/integrations/vscode.md)
+- [Cline](./docs/integrations/cline.md)
+- [Windsurf](./docs/integrations/windsurf.md)
+- [Continue](./docs/integrations/continue.md)
+- [Zed](./docs/integrations/zed.md)
+- [Codex CLI](./docs/integrations/codex-cli.md)
+- [Gemini CLI](./docs/integrations/gemini-cli.md)
+- [pi](./docs/integrations/pi.md)
+
 #### From a checkout
 
 An editable install uses that environment's interpreter:
@@ -328,6 +349,36 @@ PC Δ+88L/6f 0loop ev5 ctx8%
 ```
 
 ![Illustrative pi widget: Δ+123L/4f means 123 changed lines across 4 files, 1loop means one command at the blocking threshold, ev2 counts two verification runs this session, and ctx41% shows context usage](./docs/images/status-widget.svg)
+
+## See it work
+
+[`examples/loop-brake-demo/demo.py`](./examples/loop-brake-demo/demo.py) calls
+`guard_verify` in a temporary git repository. Two identical `false` runs are
+recorded. The third is blocked and adds no evidence id. A different command
+that forces exit 0 with `|| true` is stored as `UNTRUSTED`. The temporary
+directory name and the millisecond timings change every run. This is one run:
+
+```console
+$ guard_verify('false')
+PC verify blocked · false · 2 prior failures
+Nudge: change approach or gather new information — do not re-run unchanged.
+
+$ guard_verify("python3 -c 'raise SystemExit(1)' || true")
+PC verify ev-0003 · exit 0 · UNTRUSTED · 16ms
+cwd: /tmp/pc-loop-brake-4tqwi013
+cmd: python3 -c 'raise SystemExit(1)' || true
+digest: (no output)
+why: The command masks failure (`|| true`, `|| :`, `; true`, or similar), so exit 0 does not prove the check passed.
+fix: drop the trailing failure mask and re-run the command as-is. Do not cite this id as proof.
+Nudge: this run is recorded, but exit 0 here is not evidence of success.
+```
+
+The full transcript, including the two recorded failures, is in the
+[demo README](./examples/loop-brake-demo/README.md). From a dev checkout:
+
+```sh
+python3 examples/loop-brake-demo/demo.py
+```
 
 ## Interface comparison
 
@@ -912,6 +963,10 @@ host permissions. Recall is a local scan of the retained JSONL window: the
 suite does not embed journal or evidence text and does not add a vector
 database. The suite complements host permissions with durable context,
 evidence, telemetry, and narrowly scoped blocking.
+
+If this saved you a re-run, a [star](https://github.com/XJTLUmedia/Protect-Context) helps other people find it.
+
+[![Star history](https://api.star-history.com/svg?repos=XJTLUmedia/Protect-Context&type=Date)](https://star-history.com/#XJTLUmedia/Protect-Context&Date)
 
 ## License
 

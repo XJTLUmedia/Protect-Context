@@ -355,6 +355,38 @@ def test_guard_note_default_tags_are_not_shared_between_calls():
     assert [entry["tags"] for entry in journal.recent(5)] == [["agent"], ["agent"]]
 
 
+def test_tool_descriptions_name_use_params_returns_and_side_effects():
+    """Glama and other directories score the tools/list text, not the README."""
+    from fastmcp import Client
+
+    from protect_context.mcp_server import mcp
+
+    async def run():
+        async with Client(mcp) as client:
+            return {tool.name: tool for tool in await client.list_tools()}
+
+    tools = asyncio.run(run())
+    assert set(tools) == EXPECTED_TOOLS
+    for name, tool in tools.items():
+        description = tool.description or ""
+        lowered = " ".join(description.lower().split())
+        assert "use " in lowered, name
+        assert "return" in lowered, name
+        assert "side effect" in lowered, name
+        schema = tool.inputSchema or {}
+        for param, spec in (schema.get("properties") or {}).items():
+            text = spec.get("description") or ""
+            assert len(text) > 20, f"{name}.{param} needs a parameter description"
+
+    journal = tools["guard_journal"]
+    assert "default 5" in (journal.description or "")
+    limit = journal.inputSchema["properties"]["limit"]
+    assert "Default 5" in limit["description"]
+    assert "0–20" in limit["description"]
+    assert journal.annotations.readOnlyHint is True
+    assert journal.annotations.destructiveHint is False
+
+
 def test_guard_evidence_reads_one_run_back_by_id():
     from protect_context import verify
     from protect_context.mcp_server import guard_evidence
