@@ -11,15 +11,23 @@
     "pi",
     "guardrails",
     "agent-safety",
-    "context"
+    "context",
+    "mcp",
+    "model-context-protocol",
+    "coding-agent",
+    "claude-code",
+    "cursor",
+    "evidence",
+    "loop-detection",
+    "cli"
   ],
-  "homepage": "https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent",
+  "homepage": "https://github.com/XJTLUmedia/Protect-Context",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent.git"
+    "url": "git+https://github.com/XJTLUmedia/Protect-Context.git"
   },
   "bugs": {
-    "url": "https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent/issues"
+    "url": "https://github.com/XJTLUmedia/Protect-Context/issues"
   },
   "pi": {
     "extensions": [

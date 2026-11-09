@@ -9,8 +9,39 @@ description = "protect-context agent guardrail suite: shared store, MCP server (
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Zhenwei Yu", email = "xjtlumedia@gmail.com" }]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "agent-guardrails",
+  "coding-agents",
+  "cli",
+  "evidence",
+]
+# `license = "MIT"` is the SPDX expression. setuptools>=77 rejects a License
+# classifier next to that expression, so the OSI license classifier is omitted.
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 requires-python = ">=3.10"
 dependencies = ["fastmcp>=3,<4"]
+
+[project.urls]
+Homepage = "https://github.com/XJTLUmedia/Protect-Context"
+Repository = "https://github.com/XJTLUmedia/Protect-Context"
+Issues = "https://github.com/XJTLUmedia/Protect-Context/issues"
+Documentation = "https://github.com/XJTLUmedia/Protect-Context#readme"
+"MCP Registry" = "https://registry.modelcontextprotocol.io/"
 
 [project.optional-dependencies]
 dev = ["pytest", "build>=1,<2"]
