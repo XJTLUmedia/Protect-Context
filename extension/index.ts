@@ -48,12 +48,16 @@ import {
   appendJournal,
   boundedReadLimit,
   countJournal,
+  detectIntent,
+  hasAgentTag,
+  intentWithTotal,
   isJournalType,
   type JournalType,
   readJournal,
   READ_LIMIT_DEFAULT,
   recentAgentEntries,
   recentJournal,
+  renderIntent,
   renderJournal,
   sanitizeTags,
   tagsWithRequired,
@@ -347,8 +351,8 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
   }
 
   /** Incremental loop-state update for a finished bash call (O(1)). */
-  function recordLoopOutcome(cmd: string, ok: boolean, exit: number | null): void {
-    noteLoopOutcome(loopState, cmd, ok, exit);
+  function recordLoopOutcome(cmd: string, ok: boolean, exit: number | null, tool: string): void {
+    noteLoopOutcome(loopState, cmd, ok, exit, tool);
   }
 
   /** Evidence for the current session, memoized by the ledger's mtime+size
@@ -436,9 +440,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       evidenceCount: ev.count,
       contractCount: loadContract(ctx.cwd).constraints.length,
       journalCount: journal.length,
-      agentNoteCount: journal.filter((entry) =>
-        (Array.isArray(entry.tags) ? entry.tags : []).includes("agent"),
-      ).length,
+      agentNoteCount: journal.filter((entry) => hasAgentTag(entry.tags)).length,
       lastVerify: ev.last,
       ctxPct: lastCtxPct,
       diffWarnLines: cfg.diff_warn_lines,
@@ -513,7 +515,28 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
         ms: res.ms,
       };
       appendJsonlLocked(verifyRunsPath(ctx.cwd), r);
-      recordLoopOutcome(fp, r.ok, r.exit);
+      // Mirror the run into events.jsonl as a call/result pair so every
+      // interface leaves the same footprint (Python guard_verify does the same).
+      // `tool_execution_end` must not append its own row for this tool: `ok`
+      // there is !isError, which stays true for a command that exited non-zero.
+      const base = { ts: r.ts, session: r.session, tool: "guard_verify", cmd: r.cmd };
+      appendJsonlLocked(eventsPath(ctx.cwd), {
+        ...base,
+        kind: "tool_call",
+        ok: null,
+        ms: null,
+        out_chars: null,
+        exit: null,
+      });
+      appendJsonlLocked(eventsPath(ctx.cwd), {
+        ...base,
+        kind: "tool_result",
+        ok: r.ok,
+        ms: r.ms,
+        out_chars: Array.from(r.digest).length,
+        exit: r.exit,
+      });
+      recordLoopOutcome(fp, r.ok, r.exit, "guard_verify");
       loopLedgerMemo = loopLedgerStamp(ctx.cwd);
       return r;
     });
@@ -621,6 +644,11 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
         (entry) => entry.type !== "correction",
       ),
       recallPool: trustedRecallPool(journal),
+      // Newest first, un-capped: buildBrief applies BRIEF_MAX_INTENT and reports
+      // how many it hid, so a capped brief never implies the list ended.
+      ownerIntent: [...intentWithTotal(journal, journal.length).rows]
+        .reverse()
+        .map(({ entry }) => ({ type: entry.type, text: entry.text, tags: entry.tags })),
       loops,
       // The trust label travels with the id: a masked exit 0 must not read
       // like a clean run on the one line that anchors evidence-before-success.
@@ -714,6 +742,30 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       if (text === "" || text.startsWith("/") || text.startsWith("!")) return undefined;
       const captured = truncLine(text, TASK_DISPLAY_MAX);
       if (captured === "" || Array.from(captured).length < TASK_MIN_CAPTURE_CHARS) return undefined;
+      // The owner's own words are the durable record of what they want. An
+      // intent-bearing prompt becomes a TRUSTED journal row (no `agent` tag:
+      // the owner typed it), so the intent view has real owner lines instead of
+      // only the agent's paraphrase, and it survives events-ledger rotation.
+      // This runs before the task-anchor early return: a later prompt still
+      // states intent even when the task is already anchored.
+      const intents = detectIntent(text, true);
+      if (intents.length > 0) {
+        try {
+          const already = recentJournal(readJournal(ctx.cwd), 20).some(
+            (entry) => entry.text === captured,
+          );
+          if (!already) {
+            appendJournal(ctx.cwd, {
+              type: intents.includes("owner-correction") ? "correction" : "note",
+              text: captured,
+              tags: [...intents],
+            });
+          }
+        } catch {
+          // Journaling is best-effort: a store that cannot be written must not
+          // cost the session its task anchor below.
+        }
+      }
       const existing = state.task;
       if (existing?.source === "owner" || existing?.text === captured) return undefined;
       state.task = { text: captured, source: "prompt", ts: new Date().toISOString() };
@@ -831,6 +883,16 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       const ms = meta ? Date.now() - meta.start : null;
       const { outChars, text } = textLengthOf(event.result);
 
+      if (event.toolName === "guard_verify") {
+        // The verify path owns its own records: runVerifyAndRecord appended the
+        // evidence row, the mirrored call/result pair, and the loop outcome from
+        // the real exit code. Here `ok` is !isError, which stays true for a
+        // command that exited non-zero (the tool returns a report, not an
+        // error), so a row written here would record a failure as a success and
+        // reset the streak it just started.
+        return undefined;
+      }
+
       let cmd: string | null = null;
       let exit: number | null = null;
       let ok: boolean | null = !event.isError;
@@ -863,9 +925,12 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
           eventsPath(ctx.cwd),
           toolResultEvent(session.id, event.toolName, { ok, ms, outChars, cmd, exit }),
         );
-        // Incremental streak update (bash only). The rebuild above first
-        // incorporates external writers, then this result is applied once.
-        if (cmd !== null && ok !== null) recordLoopOutcome(cmd, ok, exit);
+        // Incremental streak update (shell runs only). The rebuild above first
+        // incorporates external writers, then this result is applied once; a
+        // non-shell reuse key never becomes a command streak.
+        if (cmd !== null && ok !== null) {
+          recordLoopOutcome(cmd, ok, exit, event.toolName);
+        }
         loopLedgerMemo = loopLedgerStamp(ctx.cwd);
       });
 
@@ -1280,6 +1345,31 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       const limit = params.limit === undefined ? READ_LIMIT_DEFAULT : boundedReadLimit(params.limit);
       const text = renderJournal(recentJournal(journal, limit, type), countJournal(journal, type), type);
       return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_intent",
+    label: "Guard Intent",
+    description:
+      "Owner wants, needs, preferences, and corrections from the journal (read-only). No query needed: every row whose " +
+      "text expresses an owner want, need, or preference, or an explicit \"you are wrong\" correction, plus rows tagged " +
+      "owner-want|owner-need|owner-preference|owner-correction. Each line is kind · timestamp · text [provenance]; " +
+      "provenance owner is a trusted row, agent is model-recorded and still unverified. limit is clamped to 0-20.",
+    promptSnippet: "Read what the owner wants, needs, and corrected",
+    promptGuidelines: [
+      "Use guard_intent when you need the owner's stated wants or corrections without guessing search keywords.",
+      "Treat provenance agent as unverified: confirm it before acting on it as owner authority.",
+    ],
+    parameters: Type.Object({
+      limit: Type.Optional(
+        Type.Integer({ description: "How many owner statements to read (0-20, default 5)" }),
+      ),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const limit = params.limit === undefined ? READ_LIMIT_DEFAULT : boundedReadLimit(params.limit);
+      const { rows, total, counts } = intentWithTotal(readJournal(ctx.cwd), limit);
+      return Promise.resolve({ content: [{ type: "text", text: renderIntent(rows, total, counts) }], details: {} });
     },
   });
 

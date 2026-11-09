@@ -400,6 +400,7 @@ def run_verify(command: str, timeout_s: int = 180) -> dict:
     stamp_before = _stamp_json()
     known_total = _cached_total(stamp_before)
     recorded = store.locked_append(store.verify_path(), _make_entry)
+    _record_event(recorded)
     if known_total is not None:
         # This run is itself a valid row, so the sidecar can advance instead of
         # going stale: the next process need not parse the ledger to count it.
@@ -407,6 +408,45 @@ def run_verify(command: str, timeout_s: int = 180) -> dict:
     shown = dict(recorded)
     shown["cwd"] = cwd
     return shown
+
+
+def _record_event(entry: dict) -> None:
+    """Mirror a verify run into events.jsonl as a `tool_call`/`tool_result` pair.
+
+    events.jsonl used to be written only by the pi extension, so the event
+    ledger described pi TUI activity only: an MCP-only or CLI-only workflow
+    contributed nothing, and ``budget`` under-counted the work actually done.
+    The pair matches what the extension records for a bash call. The evidence
+    ledger stays authoritative for the outcome and is what recall reuses for
+    these commands; loop streaks read guard_verify outcomes from verify_runs and
+    ignore the mirrored result, so history is added without double-counting.
+    """
+    base = {
+        "ts": entry.get("ts"),
+        "session": entry.get("session"),
+        "tool": "guard_verify",
+        "cmd": entry.get("cmd"),
+    }
+    call = {
+        **base,
+        "kind": "tool_call",
+        "ok": None,
+        "ms": None,
+        "out_chars": None,
+        "exit": None,
+    }
+    result = {
+        **base,
+        "kind": "tool_result",
+        "ok": entry.get("ok"),
+        "ms": entry.get("ms"),
+        "out_chars": len(entry.get("digest") or ""),
+        "exit": entry.get("exit"),
+    }
+    with contextlib.suppress(Exception):
+        # Observations are best-effort: never lose the evidence row over them.
+        store.append_jsonl(store.events_path(), call)
+        store.append_jsonl(store.events_path(), result)
 
 
 def _scoped(runs: list[dict], session: str | None) -> list[dict]:

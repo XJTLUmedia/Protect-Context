@@ -60,17 +60,29 @@ function applyOutcome(map: Map<string, LoopInfo>, outcome: LoopOutcome): void {
   map.set(cmd, cur);
 }
 
+/** Tools whose runs may accumulate a streak; everything else only records a
+ *  reuse key for recall (a path or pattern is not a command). */
+const STREAK_TOOLS = new Set(["bash", "guard_verify"]);
+
+/** Only shell runs and the evidence tool can form a streak. A missing tool is
+ *  treated as a shell run for legacy rows (mirrors loops.streaks). */
+function toolMayStreak(tool: unknown): boolean {
+  return typeof tool !== "string" || tool === "" || STREAK_TOOLS.has(tool);
+}
+
 /**
  * Failing-command streaks per fingerprint-normalized command for a session.
  * SPEC §1 #9 calls these "streaks": the count of failures since the LAST
  * SUCCESSFUL run of that same fingerprint — a success (ok=true) resets the
  * streak, a failure of a different command does not. This mirrors
- * loops.streaks() on the Python side exactly (same store, same arithmetic).
+ * loops.streaks() on the Python side exactly (same store, same arithmetic,
+ * same tool filter).
  */
 export function failedAttempts(events: EventRecord[], session: string): Map<string, LoopInfo> {
   const map = new Map<string, LoopInfo>();
   for (const e of events) {
     if (e.kind !== "tool_result" || e.session !== session) continue;
+    if (!toolMayStreak(e.tool)) continue;
     if (typeof e.cmd !== "string" || e.cmd === "") continue;
     applyOutcome(map, {
       ts: typeof e.ts === "string" ? e.ts : "",
@@ -87,9 +99,6 @@ export function failedAttempts(events: EventRecord[], session: string): Map<stri
  * guard_verify writes the evidence ledger rather than events.jsonl, so using
  * events alone forgets its failures after a restart. Session scoping is
  * applied before merging; older sessions can never affect the new one. */
-/** Tools whose runs may accumulate a streak; everything else only feeds recall. */
-const STREAK_TOOLS = new Set(["bash", "guard_verify"]);
-
 export function failedAttemptsFromLedgers(
   events: EventRecord[],
   runs: VerifyRun[],
@@ -101,7 +110,11 @@ export function failedAttemptsFromLedgers(
     if (event.kind !== "tool_result" || event.session !== session || typeof event.cmd !== "string" || event.cmd === "") continue;
     // Other tools record a reuse key (a path or pattern) in `cmd` so recall can
     // point back at it. That key is not a command: it must never form a streak.
-    if (typeof event.tool === "string" && event.tool !== "" && !STREAK_TOOLS.has(event.tool)) continue;
+    if (!toolMayStreak(event.tool)) continue;
+    // A guard_verify run is mirrored into events.jsonl so every interface has
+    // command history, but verify_runs is authoritative for its outcome: count
+    // the ledger row, never both, or the brake trips after half the failures.
+    if (event.tool === "guard_verify") continue;
     outcomes.push({
       ts: typeof event.ts === "string" ? event.ts : "",
       cmd: event.cmd,
@@ -158,13 +171,17 @@ export function openLoopsFromMap(map: Map<string, LoopInfo>, loopBlockAfter: num
 }
 
 /** Apply one finished command to an in-memory streak map (same rules as the
- * ledger rebuild). */
+ * ledger rebuild, including the tool filter). `tool` defaults to bash so an
+ * existing call site keeps its old meaning; non-shell tools leave the map
+ * untouched because their `cmd` is a reuse key, not a command. */
 export function noteLoopOutcome(
   map: Map<string, LoopInfo>,
   cmd: string,
   ok: boolean,
   exit: number | null,
+  tool = "bash",
 ): void {
+  if (!toolMayStreak(tool)) return;
   applyOutcome(map, { ts: "", cmd, ok, exit, order: 0 });
 }
 

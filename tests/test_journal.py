@@ -107,13 +107,15 @@ def test_correction_ack_names_the_trusted_channel():
 
 def test_a_misspelled_satisfaction_tag_is_normalized_and_reported():
     entry = journal.add("correction", "owner wanted the broad fix", ["dissatisfed", "agent"])
-    assert entry["tags"] == ["dissatisfied", "agent"]
+    # The owner-want tag is detected from the text and prepended, so the stored
+    # row is discoverable by tag as well as by wording.
+    assert entry["tags"] == ["owner-want", "dissatisfied", "agent"]
     ack = journal.render_ack(entry, 1)
     assert "normalized to 'dissatisfied'" in ack
     # The note is display-only: the frozen four-key row never gains extra fields.
     stored = store.read_jsonl(store.journal_path())[-1]
     assert set(stored) == {"ts", "type", "text", "tags"}
-    assert stored["tags"] == ["dissatisfied", "agent"]
+    assert stored["tags"] == ["owner-want", "dissatisfied", "agent"]
 
 
 def test_a_lesson_without_a_trigger_tag_is_flagged():
@@ -121,3 +123,79 @@ def test_a_lesson_without_a_trigger_tag_is_flagged():
     assert "no trigger tag" in journal.render_ack(entry, 1)
     tagged = journal.add("decision", "take all follow-ups from a review", ["lesson", "followup"])
     assert "no trigger tag" not in journal.render_ack(tagged, 2)
+
+
+def test_detect_intent_names_wants_needs_preferences_and_corrections():
+    assert journal.detect_intent("owner wants the broad fix") == ["owner-want"]
+    assert journal.detect_intent("the user needs both runtimes green") == ["owner-need"]
+    assert journal.detect_intent("I prefer minimal diffs") == ["owner-preference"]
+    assert journal.detect_intent("CORRECTION (owner): you are wrong about tags") == [
+        "owner-correction"
+    ]
+    # An agent's own plan is not owner intent, and neither is a plain result.
+    assert journal.detect_intent("I want to check the ledger") == []
+    assert journal.detect_intent("ran pytest: 258 passed") == []
+
+
+def test_detect_intent_captures_owner_authored_paraphrase():
+    """Text the owner typed needs no attribution noun; agent prose still does."""
+    assert journal.detect_intent("ship it faster", owner_authored=True) == ["owner-want"]
+    assert journal.detect_intent("ship it faster") == []
+    assert journal.detect_intent("I'd rather split this into two commits", owner_authored=True) == [
+        "owner-preference"
+    ]
+    assert journal.detect_intent("I need both runtimes green", owner_authored=True) == [
+        "owner-need"
+    ]
+    assert journal.detect_intent("this is wrong", owner_authored=True) == ["owner-correction"]
+    assert journal.detect_intent("unrelated bookkeeping", owner_authored=True) == []
+
+
+def test_add_tags_owner_intent_and_never_evicts_provenance():
+    entry = journal.add("correction", "owner wants the broad fix", ["agent"])
+    assert entry["tags"] == ["owner-want", "agent"]
+    assert "owner intent detected" in journal.render_ack(entry, 1)
+
+    crowded = journal.add(
+        "note", "owner needs the audit", [f"t{i}" for i in range(10)] + ["agent"]
+    )
+    assert len(crowded["tags"]) == journal.TAG_COUNT_CAP
+    assert crowded["tags"][-1] == "agent", "provenance survives a full tag list"
+    assert crowded["tags"][0] == "owner-need"
+
+
+def test_intent_view_groups_counts_and_labels_provenance():
+    journal.add("decision", "owner approved layering", ["agent"])
+    journal.add("note", "owner prefers broad fixes")
+    journal.add("note", "unrelated entry")
+
+    rows, total, counts = journal.intent_with_total(5)
+    text = journal.render_intent(rows, total, counts)
+    assert total == 2
+    assert counts["owner-want"] == 1 and counts["owner-preference"] == 1
+    # Provenance split: how much of the profile is the owner's own record.
+    assert counts["owner"] == 1 and counts["agent"] == 1
+    assert "PC intent · 2 of 2 owner statements" in text
+    assert "want 1 · need 0 · preference 1 · correction 0" in text
+    assert "owner 1 · agent 1" in text
+    assert "[agent]" in text and "[owner]" in text
+    # Newest first, so today's want is easier to act on than last week's.
+    assert text.index("owner-preference") < text.index("owner-want")
+    assert text.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_intent_view_reaches_untagged_rows_and_bounds_the_page():
+    store.append_jsonl(
+        store.journal_path(),
+        {
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "decision",
+            "text": "the user wants both runtimes green",
+            "tags": [],
+        },
+    )
+    rows, total, counts = journal.intent_with_total(0)
+    assert rows == [] and total == 1, "the count still reports what exists"
+    text = journal.render_intent(rows, total, counts)
+    assert "0 of 1 owner statements" in text
+    assert "raise the limit" in text

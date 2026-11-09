@@ -24,7 +24,7 @@
  */
 
 import { normalizeCommand } from "./fingerprint.ts";
-import { isJournalType, sanitizeTags, type JournalEntry } from "./journal.ts";
+import { hasAgentTag, isJournalType, sanitizeTags, type JournalEntry } from "./journal.ts";
 import { eventsPath, journalPath, readJsonl, verifyRunsPath } from "./store.ts";
 import { normalizeOneLine } from "./text.ts";
 
@@ -214,12 +214,6 @@ function requestedTags(tags: unknown): string[] {
   return found;
 }
 
-function isAgent(tags: string[]): boolean {
-  // Exact reserved tag, same as the journal's trusted selectors. Do not stop
-  // at the display cap: a legacy row can carry `agent` past the first tags.
-  return tags.some((tag) => normalizeOneLine(tag, 40) === "agent");
-}
-
 function displayTags(tags: string[]): string[] {
   return sanitizeTags(tags);
 }
@@ -240,7 +234,7 @@ function asJournal(row: unknown): CorpusRow | null {
     tags,
     evidenceId: null,
     exitCode: null,
-    provenance: isAgent(tags) ? "agent" : "trusted",
+    provenance: hasAgentTag(tags) ? "agent" : "trusted",
   };
 }
 
@@ -266,10 +260,6 @@ function asEvidence(row: unknown): CorpusRow | null {
   };
 }
 
-/**
- * Successful bash calls from the events ledger, one row per command family.
- * A refused (`ok === false`) call is not a proven recipe, so it is skipped.
- */
 /**
  * Non-shell tool calls grouped by the path/pattern they touched.
  *
@@ -322,17 +312,50 @@ function fileRows(events: unknown[]): CorpusRow[] {
   return [...grouped.values()];
 }
 
+/**
+ * Successful bash calls from the events ledger, one row per command family.
+ *
+ * Only `tool_call` rows with a command that was not refused (`ok` not false)
+ * are reused: a blocked or declined attempt is not a proven recipe. An outcome
+ * is attached only when it can be correlated with one outstanding call — by the
+ * result's own command fingerprint, or when exactly one pending call carries
+ * the result's tool. With overlapping calls the pairing would be a guess, and a
+ * mislabelled outcome is worse than none (mirrors recall._command_rows).
+ */
 function commandRows(events: unknown[]): CorpusRow[] {
   const grouped = new Map<string, CorpusRow>();
-  const pending = new Map<string, string>(); // session -> latest unpaired call
+  // session -> still-unpaired calls, oldest first; bounded like recall.py.
+  const pending = new Map<string, Array<{ tool: string; key: string }>>();
   for (const row of events) {
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
     const record = row as Record<string, unknown>;
     const session = typeof record.session === "string" ? record.session : "";
     if (record.kind === "tool_result") {
-      const key = pending.get(session);
-      pending.delete(session);
-      const seen = key === undefined ? undefined : grouped.get(key);
+      const stack = pending.get(session);
+      if (!stack || stack.length === 0) continue;
+      const tool = typeof record.tool === "string" ? record.tool : "";
+      const resultCmd = record.cmd;
+      const resultKey =
+        typeof resultCmd === "string" && resultCmd.trim() !== "" ? normalizeCommand(resultCmd) : "";
+      let match = -1;
+      if (resultKey !== "") {
+        for (let index = stack.length - 1; index >= 0; index -= 1) {
+          if (stack[index]?.key === resultKey) {
+            match = index;
+            break;
+          }
+        }
+      }
+      if (match === -1) {
+        const candidates: number[] = [];
+        stack.forEach((call, index) => {
+          if (tool === "" || call.tool === tool) candidates.push(index);
+        });
+        if (candidates.length === 1) match = candidates[0] ?? -1;
+      }
+      if (match === -1) continue;
+      const paired = stack.splice(match, 1)[0];
+      const seen = paired === undefined ? undefined : grouped.get(paired.key);
       if (seen) {
         seen.lastOk = typeof record.ok === "boolean" ? record.ok : null;
         seen.lastExit =
@@ -340,12 +363,15 @@ function commandRows(events: unknown[]): CorpusRow[] {
       }
       continue;
     }
-    if (record.kind !== "tool_call") continue;
-    if (record.ok === false) continue;
+    if (record.kind !== "tool_call" || record.ok === false) continue;
     if (typeof record.cmd !== "string" || record.cmd.trim() === "") continue;
     const key = normalizeCommand(record.cmd);
     if (key === "") continue;
-    pending.set(session, key);
+    const tool = typeof record.tool === "string" ? record.tool : "";
+    const stack = pending.get(session) ?? [];
+    stack.push({ tool, key });
+    if (stack.length > 4) stack.splice(0, stack.length - 4);
+    pending.set(session, stack);
     const ts = typeof record.ts === "string" ? record.ts : "";
     const seen = grouped.get(key);
     if (!seen) {
@@ -391,9 +417,11 @@ export function wordHit(haystack: string, keyword: string): boolean {
     const idx = folded.indexOf(keyword, start);
     if (idx < 0) return false;
     if (idx === 0) return true;
-    const code = folded.charCodeAt(idx - 1);
-    const alnum = (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
-    if (!alnum) return true;
+    // Mirror Python's str.isalnum(): Unicode letters and numbers also end a
+    // word. Slicing by code point keeps astral symbols intact, and an ASCII
+    // test here let "naïold"/"表格old" match "old" where Python does not.
+    const prior = Array.from(folded.slice(0, idx)).at(-1);
+    if (prior === undefined || !/^[\p{L}\p{N}]$/u.test(prior)) return true;
     start = idx + 1;
   }
 }
@@ -486,6 +514,14 @@ function toHit(row: CorpusRow, strength: number, recency: number): RecallHit {
   };
 }
 
+/** Codepoint order, matching Python's str comparison: localeCompare is
+ *  locale-dependent and would let the same query rank differently per host. */
+function compareText(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /** Rank already-loaded rows. Does not touch the filesystem. */
 export function searchRows(
   journalRows: unknown[],
@@ -541,7 +577,7 @@ export function searchRows(
     matched.push({ row, strength: weighted + bonus, seq });
   });
 
-  matched.sort((a, b) => a.row.ts.localeCompare(b.row.ts) || a.seq - b.seq);
+  matched.sort((a, b) => compareText(a.row.ts, b.row.ts) || a.seq - b.seq);
   const ranked = matched.map((item, recency) => toHit(item.row, item.strength, recency));
   ranked.sort((a, b) => b.strength - a.strength || b.recency - a.recency);
   return {
@@ -553,7 +589,11 @@ export function searchRows(
 
 /** Search the on-disk retained window. Does not create `.agent-guard/`. */
 export function searchStore(cwd: string, query: RecallQuery = {}): RecallResult {
-  const events = query.query !== undefined && query.query !== "" ? readJsonl<unknown>(eventsPath(cwd)) : [];
+  // Read the events ledger only when a keyword query can use it. A cmd-only
+  // filter cannot: cmdBonus narrows to evidence rows, so command/file hints
+  // are excluded regardless (same rule as recall._cmd_bonus).
+  const keywords = keywordsOf(query.query);
+  const events = keywords.length > 0 ? readJsonl<unknown>(eventsPath(cwd)) : [];
   return searchRows(readJsonl<unknown>(journalPath(cwd)), readJsonl<unknown>(verifyRunsPath(cwd)), query, events);
 }
 
@@ -615,7 +655,7 @@ export function trustedRecallPool(journal: JournalEntry[]): JournalEntry[] {
     const entry = journal[index];
     if (!entry || entry.type === "risk") continue;
     if (entry.type !== "decision" && entry.type !== "correction" && entry.type !== "note") continue;
-    if (sanitizeTags(entry.tags).includes("agent")) continue;
+    if (hasAgentTag(entry.tags)) continue;
     pool.push(entry);
   }
   return pool;

@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from protect_context import store, verify
+from protect_context import recall, store, verify
 
 
 def test_true_is_recorded_ok():
@@ -26,6 +26,26 @@ def test_false_recorded_never_raises():
     e = verify.run_verify("false")
     assert e["ok"] is False
     assert e["exit"] == 1
+
+
+def test_run_is_mirrored_into_the_events_ledger():
+    """Every interface gets command history: an MCP/CLI verify run used to
+    leave events.jsonl empty, so recall could not offer the command back."""
+    e = verify.run_verify("true")
+    events = store.read_jsonl(store.events_path())
+    assert [row["kind"] for row in events] == ["tool_call", "tool_result"]
+    call, row = events
+    assert call["tool"] == "guard_verify" and call["cmd"] == "true"
+    assert call["ok"] is None, "an issued call is not a refusal"
+    assert row["tool"] == "guard_verify"
+    assert row["cmd"] == "true" and row["exit"] == 0 and row["ok"] is True
+    assert row["session"] == e["session"]
+    assert row["out_chars"] == len(e["digest"])
+    # recall reuses tool_call rows for bash, and reaches a verify command
+    # through its evidence row (the command corpus skips a command that is
+    # already evidence), so the run is findable either way.
+    res = recall.search("true")
+    assert any(hit.cmd == "true" for hit in res.hits)
 
 
 def test_blank_command_is_rejected_without_evidence():

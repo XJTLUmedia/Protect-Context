@@ -74,3 +74,37 @@ test("ledger: rotated segments are valid jsonl and the live file keeps appending
     assert.deepEqual(readJsonl<{ n: number }>(file).map((r) => r.n), [1, -1, 2, 3]);
   });
 });
+
+test("ledger: a pinned lesson survives the rotation that drops its segment", () => {
+  withCwd((cwd) => {
+    const file = join(cwd, "journal.jsonl");
+    const lesson = { ts: "2026-01-01T00:00:00.000Z", type: "decision", text: "durable lesson", tags: ["lesson"] };
+    // Two rotations' worth of history: the lesson has reached the last segment,
+    // which THIS rotation overwrites in place.
+    writeFileSync(`${cwd}/journal.3.jsonl`, `${JSON.stringify(lesson)}\n`, "utf8");
+    writeFileSync(`${cwd}/journal.2.jsonl`, `${JSON.stringify({ n: 2, tags: [] })}\n`, "utf8");
+    writeFileSync(`${cwd}/journal.1.jsonl`, `${JSON.stringify({ n: 1, tags: [] })}\n`, "utf8");
+    forceRotation(file, [7]);
+
+    const rows = readJsonl<{ text?: string }>(file);
+    assert.ok(
+      rows.some((row) => row.text === "durable lesson"),
+      "SPEC §2: a lesson is carried into the fresh live journal instead of being deleted",
+    );
+
+    // A carried lesson is not duplicated by the next rotation.
+    forceRotation(file, [8]);
+    const copies = readJsonl<{ text?: string }>(file).filter((row) => row.text === "durable lesson");
+    assert.equal(copies.length, 1, "carrying is once per dropped segment, not per rotation");
+
+    // Only the journal is pinned: events rotation still drops the oldest rows.
+    const events = join(cwd, "events.jsonl");
+    writeFileSync(`${cwd}/events.2.jsonl`, `${JSON.stringify({ text: "older event", tags: [] })}\n`, "utf8");
+    writeFileSync(`${cwd}/events.3.jsonl`, `${JSON.stringify({ text: "old event", tags: ["lesson"] })}\n`, "utf8");
+    forceRotation(events, [9]);
+    assert.ok(
+      !readJsonl<{ text?: string }>(events).some((row) => row.text === "old event"),
+      "pinning applies to the journal, not to every ledger",
+    );
+  });
+});

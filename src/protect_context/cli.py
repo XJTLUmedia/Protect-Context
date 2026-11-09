@@ -205,6 +205,12 @@ def cmd_journal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intent(args: argparse.Namespace) -> int:
+    rows, total, counts = journal.intent_with_total(args.limit)
+    print(journal.render_intent(rows, total, counts))
+    return 0
+
+
 def cmd_recall(args: argparse.Namespace) -> int:
     try:
         result = recall.search(
@@ -336,6 +342,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=journal.READ_LIMIT_DEFAULT)
     sp.add_argument("--type", choices=list(store.JOURNAL_TYPES), default=None)
     sp.set_defaults(func=cmd_journal)
+
+    sp = sub.add_parser(
+        "intent",
+        help="owner wants, needs, preferences and corrections from the journal",
+    )
+    sp.add_argument("--limit", type=int, default=journal.READ_LIMIT_DEFAULT)
+    sp.set_defaults(func=cmd_intent)
 
     sp = sub.add_parser(
         "recall",

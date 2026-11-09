@@ -450,6 +450,52 @@ export function ledgerFiles(file: string): string[] {
   return files;
 }
 
+/** Journal tags whose rows must outlive ledger rotation (SPEC §2): a lesson is
+ *  durable by definition, but the journal rotates like any other ledger, so
+ *  rotation would eventually delete the oldest lessons. They are carried into
+ *  the fresh live file instead, once per dropped segment. */
+const PINNED_TAGS = new Set(["lesson"]);
+
+function isPinnedRow(row: unknown): boolean {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  const tags = (row as { tags?: unknown }).tags;
+  return (
+    Array.isArray(tags) &&
+    tags.some((tag) => typeof tag === "string" && PINNED_TAGS.has(tag.toLowerCase()))
+  );
+}
+
+function rowKey(row: unknown): string {
+  const r = (row ?? {}) as { ts?: unknown; text?: unknown };
+  return JSON.stringify([r.ts, r.text]);
+}
+
+/** Pinned rows held by the segment rotation is about to overwrite. Must run
+ *  BEFORE the shift: the segment at the drop index is replaced in place, so
+ *  its old contents are gone afterwards. */
+function pinnedFromDroppedSegment(file: string): unknown[] {
+  if (basename(file) !== "journal.jsonl") return [];
+  const dropped = segmentPath(file, Math.max(1, LEDGER_SEGMENTS));
+  if (!existsSync(dropped)) return [];
+  return readJsonl<unknown>(dropped).filter(isPinnedRow);
+}
+
+/** Copy carried lessons into the fresh live file. A lesson carried at one
+ *  rotation still exists at the next, so rows already surviving are skipped:
+ *  each lesson is copied when its original segment is dropped, not every time. */
+function carryPinnedRows(file: string, carried: unknown[]): void {
+  if (carried.length === 0) return;
+  const surviving = new Set(readJsonl<unknown>(file).map(rowKey));
+  const fresh = carried.filter((row) => !surviving.has(rowKey(row)));
+  if (fresh.length === 0) return;
+  try {
+    appendFileSync(file, fresh.map((row) => `${JSON.stringify(row)}\n`).join(""), "utf8");
+  } catch {
+    // Best-effort: a lesson that cannot be carried must never break the append
+    // that triggered the rotation.
+  }
+}
+
 function maybeRotateLedger(file: string): void {
   let size: number;
   try {
@@ -459,11 +505,13 @@ function maybeRotateLedger(file: string): void {
   }
   if (size < LEDGER_MAX_BYTES) return;
   // Caller holds the store lease, so the shift cannot race another writer.
+  const carried = pinnedFromDroppedSegment(file);
   for (let index = LEDGER_SEGMENTS - 1; index >= 1; index -= 1) {
     const src = segmentPath(file, index);
     if (existsSync(src)) renameSync(src, segmentPath(file, index + 1));
   }
   renameSync(file, segmentPath(file, 1));
+  carryPinnedRows(file, carried);
 }
 
 function readOneJsonl<T>(file: string): T[] {
@@ -558,7 +606,22 @@ export interface GuardState {
   counters: Record<string, number | string>;
   /** Project-level task capture (absent = nothing captured yet). */
   task?: TaskCapture;
+  /** Unknown top-level keys survive a load/save round trip, exactly like the
+   *  Python dict-based state: a CLI/MCP save must never delete a key another
+   *  surface wrote (SPEC §2). The legacy v1 flat pair is the one exception and
+   *  is popped on both sides. */
+  [key: string]: unknown;
 }
+
+/** Keys `loadState` owns; every other top-level key is passed through. */
+const KNOWN_STATE_KEYS = new Set([
+  "current_session",
+  "sessions",
+  "counters",
+  "task",
+  "brief_digest",
+  "notify_watermarks",
+]);
 
 /** How many per-session baselines to retain (newest first, current always). */
 export const SESSION_KEEP = 8;
@@ -673,7 +736,7 @@ export function loadState(cwd: string): GuardState | null {
     }
   }
   const task = readTask(value.task);
-  return {
+  const state: GuardState = {
     current_session: {
       id: currentId,
       started: typeof rawSession.started === "string" ? rawSession.started : "",
@@ -683,6 +746,12 @@ export function loadState(cwd: string): GuardState | null {
     counters,
     ...(task === undefined ? {} : { task }),
   };
+  // Python's load_state copies every top-level key and save_state writes the
+  // mapping back; mirroring it keeps a key written by another surface alive.
+  for (const [key, candidate] of Object.entries(value)) {
+    if (!KNOWN_STATE_KEYS.has(key)) state[key] = candidate;
+  }
+  return state;
 }
 
 /** Persist state.json, keeping the file bounded (SESSION_KEEP entries, the

@@ -614,6 +614,11 @@ def search(
     wanted_tags = _requested_tags(tags)
     cmd_filter = _blank_to_none(cmd)
 
+    # Capture what the caller supplied BEFORE loading: after the two loads
+    # below these variables are never None, which used to make `supplied`
+    # always true and silently disable reuse from the events ledger on the
+    # ordinary on-disk path (CLI and MCP).
+    rows_supplied = journal_rows is not None or evidence_rows is not None
     if journal_rows is None:
         journal_rows = store.read_jsonl(store.journal_path())
     if evidence_rows is None:
@@ -635,8 +640,7 @@ def search(
     # ledger-shaped) and skipped when the same command is already evidence.
     if include_commands and (keywords or cmd_filter):
         if event_rows is None:
-            supplied = journal_rows is not None or evidence_rows is not None
-            event_rows = [] if supplied else store.read_jsonl(store.events_path())
+            event_rows = [] if rows_supplied else store.read_jsonl(store.events_path())
         known = {store.fingerprint(row["cmd"]) for row in corpus if row["cmd"]}
         for row in _command_rows(event_rows):
             if store.fingerprint(row["cmd"]) in known:

@@ -7,6 +7,7 @@ import {
   selectTaskRecall,
   BRIEF_MAX_CORRECTIONS,
   BRIEF_MAX_DECISIONS,
+  BRIEF_MAX_INTENT,
   BRIEF_MAX_LOOPS,
   BRIEF_MAX_RECALL,
   TASK_DISPLAY_MAX,
@@ -440,4 +441,34 @@ test("brief: the precedent cap is configurable and can be zero", () => {
     lastEvidence: null,
   });
   assert.doesNotMatch(off, /precedents:/);
+});
+
+test("brief: owner intent is injected, labelled, capped and counted", () => {
+  const brief = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    ownerIntent: [
+      { type: "note", text: "ship it faster", tags: ["owner-want"] },
+      { type: "note", text: "owner wants zero regressions", tags: ["owner-want", "agent"] },
+      { type: "note", text: "prefer one commit per fix", tags: ["owner-preference"] },
+    ],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.match(brief, /^owner intent:$/m);
+  assert.match(brief, /^- ship it faster$/m, "the owner's own row carries no marker");
+  assert.match(brief, /^- owner wants zero regressions \(unverified\)$/m);
+  const shown = brief.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(shown.length, BRIEF_MAX_INTENT);
+  assert.match(brief, /^\+1 more owner statements — guard_intent lists them$/m);
+
+  // A row already visible in the journal sections is not repeated.
+  const deduped = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [{ type: "correction", text: "ship it faster", tags: ["agent"] }],
+    ownerIntent: [{ type: "note", text: "ship it faster", tags: ["owner-want"] }],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.doesNotMatch(deduped, /owner intent:/);
 });

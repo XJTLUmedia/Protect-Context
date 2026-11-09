@@ -6,6 +6,9 @@
 
 /** Truncate `s` to `max` chars with a trailing ellipsis when longer. */
 export function trunc(s: string, max = 200): string {
+  // A zero/negative cap means "show nothing": the ellipsis itself would
+  // exceed the requested budget (and callers pass model-supplied caps).
+  if (max <= 0) return "";
   const chars = Array.from(s);
   return chars.length > max ? `${chars.slice(0, Math.max(0, max - 1)).join("")}…` : s;
 }

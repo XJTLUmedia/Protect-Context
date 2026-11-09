@@ -1,6 +1,6 @@
 # SPEC — protect-context · Agent Guardrail Suite
 
-**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events; amended 2026-11-06: local `guard_recall` / `recall` over the retained JSONL window, no embeddings) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
+**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events; amended 2026-11-06: local `guard_recall` / `recall` over the retained JSONL window, no embeddings; amended 2026-11-09: `guard_intent` / `intent` owner-intent view — wants, needs, preferences, and corrections captured as `owner-*` tags, an intent-bearing owner prompt becoming a trusted journal row, ≤2 owner statements in the brief, and verify runs mirrored into `events.jsonl` with the evidence ledger authoritative for outcomes) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
 
 ## 0. Mission & principles
 
@@ -51,6 +51,13 @@ Principles: advisory-first (nudge before block); block only for repeated identic
 - A refused bash call (loop block, declined risk confirm) is recorded as a
   `tool_call` row with `cmd` + `ok=false` and no matching `tool_result`; loop
   streaks read `tool_result` rows only, so a refusal never counts as a run.
+- Python `guard_verify` (MCP and CLI) mirrors each run into `events.jsonl` as a
+  `tool_call`/`tool_result` pair (`tool="guard_verify"`, same `cmd`/`ok`/`exit`/`ms`),
+  so the event ledger describes verify work from every interface, not only pi
+  TUI activity. `verify_runs.jsonl` stays
+  authoritative for the OUTCOME: loop streaks read `guard_verify` outcomes from
+  the evidence ledger and skip these mirrored event rows, so one attempt can
+  never count twice.
 
 ### Personal layer (outside the project store)
 
@@ -196,6 +203,23 @@ to verify runs. Hits are ranked by match strength, then recency, and labelled
 add one hint when a cap hides entries, plus at most two trusted tag matches
 for the owner task. See README.
 
+### Amendment 2026-11-09 — owner intent
+
+`guard_intent` (MCP + pi) and `intent [--limit N]` (CLI) answer "what does the
+owner want" with no keyword query: every journal row whose text expresses an
+owner want, need, preference, or an explicit "you are wrong" correction, plus
+rows carrying `owner-want` / `owner-need` / `owner-preference` /
+`owner-correction`. New journal rows are tagged automatically from their text
+(detection is deterministic; the reserved `agent` tag is never dropped by the
+tag cap). Text the owner typed themselves needs no attribution — a leading
+imperative or first-person want is enough — while journal prose the agent
+writes still requires an `owner`/`user` attribution, so the agent's own "I want
+to check" is never captured as owner intent. Rows render as
+`<kind> · <ts> · <text> [provenance]` with per-kind counts and an
+`owner N · agent M` split, newest first, bounded to `READ_LIMIT_MAX` lines;
+`agent` provenance stays unverified. A read never writes and never creates
+`.agent-guard/`.
+
 ## 5. pi extension (`extension/`)
 
 Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi imports → testable via `node --test --experimental-strip-types`). **Zero npm dependencies** (node builtins only); `typebox`/`@earendil-works/pi-coding-agent` type imports are provided by the pi runtime. Loaded via jiti — no build step.
@@ -203,9 +227,9 @@ Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi impor
 Event behaviors (all thresholds from config):
 
 - `session_start`: ensure store; new session id; record git HEAD (null if no repo); load config/contract/journal; render widget.
-- `before_agent_start`: build compact brief (`task:` line ≤400 chars, contract ≤12 lines, 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified corrections, 2 unverified model notes, open loops ≤2, last evidence with its trust label, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
+- `before_agent_start`: build compact brief (`task:` line ≤400 chars, contract ≤12 lines, 2 owner statements carrying an `owner-*` intent tag or detected owner intent — an agent-tagged row is marked unverified — 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified corrections, 2 unverified model notes, open loops ≤2, last evidence with its trust label, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
 - `context`: only while a mid-run re-injection is pending (armed by `session_compact`) — if the conversation holds no persisted `guard-brief` message, append `{role:"custom", customType:"guard-brief", content, display:false}` to `event.messages`. The result is per-request, so it is re-applied on each request until a persisted block is seen; with no pending flag the handler is an O(1) no-op.
-- `input`: capture the first substantive owner prompt (≥20 chars, not a slash command) as `state.task` (source `prompt`) and invalidate the brief digest, so `task:` is re-injected on that same turn. `/guard-task` writes source `owner` and always wins; short follow-ups ("continue") never replace a task.
+- `input`: capture the first substantive owner prompt (≥20 chars, not a slash command) as `state.task` (source `prompt`) and invalidate the brief digest, so `task:` is re-injected on that same turn. An intent-bearing prompt (wants, needs, preferences, an explicit "you are wrong") is also appended to the journal as a TRUSTED row — the owner typed those words, so it carries no `agent` tag — with the detected `owner-*` tags and type `correction` when a correction was detected, `note` otherwise; the same text is not captured twice. `/guard-task` writes source `owner` and always wins; short follow-ups ("continue") never replace a task.
 - `tool_call` (bash only): (a) risk patterns → `ctx.hasUI && risk_confirm` → single `ctx.ui.confirm("Risky command", …)`; no-UI → log only, never block; a declined confirm appends `tool_call` (`cmd`, `ok=false`); (b) loop check: prior failed attempts for fingerprint ≥ `loop_block_after - 1` → append `tool_call` (`cmd`, `ok=false`) and return `{block:true, reason:"guard: '<cmd>' already failed N times this session — do not re-run unchanged; change approach or read the error. (Raise loop_block_after in .agent-guard/config.json to override.)"}`; (c) else append `tool_call` event with `cmd`.
 - `tool_execution_start`: record start time by toolCallId (map, pruned on end).
 - `tool_execution_end`: append `tool_result` event (`ok=!isError`, ms, out_chars=sum of text content lengths; bash adds cmd fingerprint + exit); update widget.
@@ -218,7 +242,7 @@ Risk patterns (deny-confirm list): `rm -rf /`, `rm -rf ~`, `git push --force` (n
 
 Commands: `/guard-status`, `/guard-contract add|remove|list [text]`, `/guard-verify <cmd>`, `/guard-note <type> <text>`, `/guard-task [<text>|--clear]` (show/replace/clear the owner task anchor), `/guard-report` (full session summary, printed).
 
-Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_contract_check` (deterministic checklist: for each constraint, mark addressed/unclear from the supplied summary text — heuristic keyword coverage, no LLM), `guard_status` (includes journal totals so the read path is discoverable).
+Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_intent` (read-only; owner wants/needs/preferences/corrections, `limit` 0-20 default 5, provenance-labelled), `guard_contract_check` (deterministic checklist: for each constraint, mark addressed/unclear from the supplied summary text — heuristic keyword coverage, no LLM), `guard_status` (includes journal totals so the read path is discoverable).
 
 Constraints: **no background processes/sockets/timers from the factory** (defer to `session_start`); idempotent `session_shutdown` cleanup; guard every `ctx.ui.*` with `ctx.hasUI`; never throw from event handlers (catch → `ctx.ui.notify`).
 

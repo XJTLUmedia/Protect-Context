@@ -230,6 +230,12 @@ def _scan_untracked(root: Path, paths: list[str], hard_line_budget: int) -> dict
             if candidate.is_symlink() or not candidate.is_file():
                 skipped_files += 1
                 continue
+            # The lexical check above cannot see a symlinked PARENT directory: a
+            # git path is relative to the root by construction, but
+            # `link/secret.txt` can still resolve outside it. Compare resolved
+            # paths before reading (this also keeps a repo reached through a
+            # symlink working).
+            candidate.resolve().relative_to(root.resolve())
         except (OSError, ValueError):
             skipped_files += 1
             continue

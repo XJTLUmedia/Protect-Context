@@ -10,6 +10,9 @@ test("text: trunc caps length with an ellipsis", () => {
   assert.equal(trunc("abcdef", 3), "ab…");
   assert.equal(trunc("😀😀", 2), "😀😀");
   assert.equal(trunc("😀😀😀", 2), "😀…");
+  // A zero cap must not smuggle the ellipsis in: it would exceed the budget.
+  assert.equal(trunc("abcdef", 0), "");
+  assert.equal(trunc("abcdef", -5), "");
 });
 
 test("text: truncLine collapses whitespace first, then caps", () => {

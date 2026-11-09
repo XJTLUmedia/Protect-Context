@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "guard_contract",
     "guard_note",
     "guard_journal",
+    "guard_intent",
     "guard_recall",
     "guard_loop_check",
     "guard_diff_audit",
@@ -29,6 +30,7 @@ EXPECTED_TOOLS = {
 READ_ONLY_TOOLS = {
     "guard_evidence",
     "guard_journal",
+    "guard_intent",
     "guard_recall",
     "guard_budget",
     "guard_orientation",
@@ -73,6 +75,8 @@ def test_all_tools_smoke():
                                "tags": ["search"]}))
             results["journal"] = _text(await client.call_tool(
                 "guard_journal", {"limit": 5, "type": "correction"}))
+            results["intent"] = _text(await client.call_tool(
+                "guard_intent", {"limit": 5}))
             results["recall"] = _text(await client.call_tool(
                 "guard_recall", {"query": "rg", "tags": ["search"], "limit": 5}))
             results["loop_check"] = _text(await client.call_tool("guard_loop_check", {}))
@@ -223,6 +227,37 @@ def test_guard_note_validation_and_guard_journal_bounds():
     assert entries[-1]["tags"].count("agent") == 1
     assert entries[-1]["tags"][-1] == "agent"
     assert len(entries[-1]["tags"]) <= journal.TAG_COUNT_CAP
+
+
+def test_guard_intent_reports_owner_statements_and_bounds_the_page():
+    from fastmcp import Client
+
+    from protect_context import journal
+    from protect_context.mcp_server import mcp
+
+    async def run():
+        async with Client(mcp) as client:
+            await client.call_tool("guard_note", {
+                "type": "decision", "text": "owner wants both runtimes green", "tags": [],
+            })
+            await client.call_tool("guard_note", {
+                "type": "correction", "text": "CORRECTION (owner): the tags were wrong", "tags": [],
+            })
+            await client.call_tool("guard_note", {
+                "type": "note", "text": "unrelated bookkeeping", "tags": [],
+            })
+            page = _text(await client.call_tool("guard_intent", {"limit": 5}))
+            zero = _text(await client.call_tool("guard_intent", {"limit": 0}))
+            return page, zero
+
+    page, zero = asyncio.run(run())
+    assert "PC intent · 2 of 2 owner statements" in page
+    assert "want 1" in page and "correction 1" in page
+    assert "owner-want · " in page and "owner-correction · " in page
+    assert "unrelated bookkeeping" not in page
+    assert page.rstrip().splitlines()[-1].startswith("Nudge:")
+    assert "0 of 2 owner statements" in zero and "raise the limit" in zero
+    assert len(journal.intent_with_total(5)[0]) == 2
 
 
 def test_guard_recall_bounds_and_validation():
@@ -383,6 +418,7 @@ def test_tool_descriptions_name_use_params_returns_and_side_effects():
     limit = journal.inputSchema["properties"]["limit"]
     assert "Default 5" in limit["description"]
     assert "0–20" in limit["description"]
+    assert journal.annotations is not None
     assert journal.annotations.readOnlyHint is True
     assert journal.annotations.destructiveHint is False
 

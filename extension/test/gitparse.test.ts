@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +37,14 @@ test("numstat: empty output", () => {
   assert.equal(parsed.lines, 0);
 });
 
+test("numstat: filename whitespace is data, not formatting", () => {
+  // Git can report a name that begins or ends with a space; trimming the line
+  // before splitting would silently rename the path (Python splits raw).
+  const parsed = parseNumstat("1\t2\t leading and trailing \n");
+  assert.equal(parsed.files[0]?.path, " leading and trailing ");
+  assert.equal(parsed.fileCount, 1);
+});
+
 const SHORTSTAT_FIXTURE = " 3 files changed, 120 insertions(+), 4 deletions(-)";
 
 test("shortstat: parses files and summed lines", () => {
@@ -57,6 +65,12 @@ test("verdict: ok / warn / hard levels against thresholds", () => {
   assert.equal(diffVerdict(100, 10, t).level, "warn", "file-count warn");
   assert.equal(diffVerdict(800, 2, t).level, "hard");
   assert.equal(diffVerdict(900, 2, t).level, "hard");
+});
+
+test("verdict: a bounded untracked scan can never be ok", () => {
+  const t = { diff_warn_lines: 400, diff_hard_lines: 800, diff_warn_files: 10 };
+  assert.equal(diffVerdict(10, 2, t, true).level, "warn", "an incomplete count is a warning");
+  assert.equal(diffVerdict(900, 2, t, true).level, "hard", "the hard limit still wins");
 });
 
 test("untracked paths: porcelain -z parser accepts only Git-selected ?? records", () => {
@@ -103,6 +117,29 @@ test("untracked scan: POSIX treats a Windows-git backslash as a separator", () =
     const scan = scanUntrackedFiles(dir, ["sub\\nested.txt"], 800);
     assert.equal(scan.lines, 2);
     assert.equal(scan.skippedFiles, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("untracked scan: a symlinked parent cannot escape the repository root", () => {
+  if (process.platform === "win32") return;
+  const dir = mkdtempSync(join(tmpdir(), "pc-untracked-link-"));
+  try {
+    // The git path `link/secret.txt` is lexically inside the repo while the
+    // bytes live outside it: only resolving both sides proves containment.
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "a\nb\nc\n", "utf8");
+    const repo = join(dir, "repo");
+    mkdirSync(repo);
+    symlinkSync(outside, join(repo, "link"), "dir");
+
+    const scan = scanUntrackedFiles(repo, ["link/secret.txt"], 800);
+    assert.equal(scan.lines, 0, "the outside file is never counted");
+    assert.equal(scan.filesScanned, 0);
+    assert.equal(scan.skippedFiles, 1);
+    assert.equal(scan.scanLimited, true, "an unread path makes the count incomplete");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -391,6 +391,7 @@ python3 examples/loop-brake-demo/demo.py
 | Scope audit | session-start baseline + warnings | `guard_diff_audit` (explicit baseline) | `diff --baseline REF` |
 | Journal write/read | `guard_note`, `/guard-note`, `guard_journal` | `guard_note`, `guard_journal` | `note`, `journal` |
 | Recall across the retained window | `guard_recall`; brief may surface 1–2 trusted tag matches | `guard_recall` | `recall` |
+| Owner intent (wants, needs, preferences, corrections) | `guard_intent` | `guard_intent` | `intent` |
 | Trusted re-injection of decisions | yes, after change and after every compaction (incl. mid-run) | read views only | read views only |
 | Re-injection of the agent's own notes | yes, in an explicitly unverified section | read views only | read views only |
 | Owner task anchor | `/guard-task`, auto-captured from the first prompt | — | — |
@@ -422,6 +423,7 @@ Model-callable tools:
 | `guard_evidence` | `limit` (default 5), optional `evidence_id` | Read-only; the window shows each non-ok row's last output line, and `evidence_id` returns one run in full |
 | `guard_journal` | `limit` (0–20, default 5), optional `type` | Read-only; recovers decisions, corrections, and the agent's own earlier notes after a compaction |
 | `guard_recall` | `query`, `type`, `tags` (AND), `limit` (0–20, default 5), `evidence_id`, `cmd` | Read-only scan of the retained window; hits labelled `trusted` or `agent` |
+| `guard_intent` | `limit` (0–20, default 5) | Read-only owner wants, needs, preferences, and corrections; no query needed, provenance-labelled |
 | `guard_contract_check` | `summary` | Deterministic keyword coverage checklist, never a proof |
 | `guard_status` | — | Same data that feeds the widget, including journal totals |
 
@@ -436,6 +438,7 @@ Model-callable tools:
 | `guard_note` | local append | Journal an entry (tagged `agent`) |
 | `guard_journal` | read-only | Recent journal entries, optionally filtered by type |
 | `guard_recall` | read-only | Search the retained journal and evidence window by keyword, tag, type, evidence id, or command |
+| `guard_intent` | read-only | Owner wants, needs, preferences, and corrections from the journal (no query) |
 | `guard_loop_check` | local, initializing read | Failing-command streaks and advice |
 | `guard_diff_audit` | local, initializing read | Diff stats and verdict vs thresholds |
 | `guard_preflight` | local, initializing read | Tool/version and worktree check |
@@ -576,6 +579,15 @@ Runtime files stay in the frozen `.agent-guard/` layout and are gitignored:
 `verify_runs.jsonl` · `state.json` · `verify_count.json` (a stamp-verified
 evidence-count sidecar, discarded rather than trusted when the ledger moves)
 
+Every interface writes the same ledgers: a `guard_verify` run from the MCP
+server or the CLI is recorded in `verify_runs.jsonl` **and** mirrored as a
+`tool_call`/`tool_result` pair in `events.jsonl`, so the event ledger describes
+verify work from every interface instead of pi TUI activity only (budget and
+loop history no longer depend on which surface ran the check). The evidence
+ledger stays authoritative for the outcome — loop streaks read `guard_verify`
+outcomes from `verify_runs.jsonl` and skip the mirrored rows, so one attempt
+can never count twice.
+
 The optional personal layer lives outside the repository at
 `~/.config/protect-context/` (`contract.json`, `config.json`) and is never
 written implicitly; see *Making it yours* above.
@@ -655,7 +667,9 @@ its own failure mode. Within the frozen 12-line constraint cap:
 3. then other entries.
 
 An agent-authored constraint therefore cannot crowd out a seed. Below the
-contract it carries up to 3 recent trusted decisions, up to 3 trusted
+contract it carries up to 2 owner statements (wants, needs, preferences and
+corrections — an agent-tagged one is marked `(unverified)`), up to 3 recent
+trusted decisions, up to 3 trusted
 corrections, up to 2 unverified corrections, up to 2 unverified agent notes,
 up to 2 open loops, and the last evidence ID with its trust label (`ok`,
 `FAIL`, `UNTRUSTED`), exit code, duration, and a truncated command. Corrections
@@ -665,6 +679,22 @@ hides journal entries, the brief points at `guard_recall`. If the owner task's
 words match a tag on a trusted entry that did not fit, it also injects at most
 two of those matches. `brief_mode: "changed"` (default) injects only when the
 rendered digest actually changed, so a quiet turn costs nothing.
+
+### Owner intent
+
+`guard_intent` (and `protect-context intent`) answers "what does the owner
+want" without a keyword query. Rows are captured two ways: a journal entry is
+tagged automatically from its text (deterministic regexes, no model call), and
+an intent-bearing prompt the owner types in the pi TUI is written straight to
+the journal with the owner's own words and **no** `agent` tag — the owner is the
+author, so that row is trusted. Journal prose written by the agent still needs
+an `owner`/`user` attribution before it counts, so the agent's own "I want to
+check" is never recorded as owner intent. The view prints one line per row
+(`kind · timestamp · text [owner|agent]`) with per-kind counts and an
+`owner N · agent M` split, newest first: a page of `[agent]` lines is visibly
+the model's report rather than owner authority. The reserved `agent` tag keeps
+the last slot when the 8-tag cap is reached, so a crowded tag list can never
+promote a model note to trusted memory.
 
 ### Local recall
 

@@ -7,6 +7,7 @@ extension when they change.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from . import store
@@ -20,6 +21,50 @@ SATISFACTION_TAGS = ("satisfied", "dissatisfied")
 GENERIC_TAGS = frozenset(
     ("lesson", "agent", "decision", "note", "correction", "risk", "protect-context")
 )
+
+# Owner intent (SPEC §1 #6/#7). The journal already keeps the words, but a new
+# session has to guess how they were phrased to find them. These four tags name
+# what the owner actually expressed — wants, needs, preferences and "you are
+# wrong" corrections — and `intent` renders the profile without a query.
+INTENT_TAGS = ("owner-want", "owner-need", "owner-preference", "owner-correction")
+_ATTR = r"(?:owner|user)"
+_INTENT_PATTERNS = {
+    "owner-want": re.compile(
+        rf"\b{_ATTR}\b[^.]{{0,40}}\b(?:wants?|wanted|asked(?: for)?|said|says|chose|"
+        rf"chosen|approved|decided|told|took|insists?|expects?|requires?)\b"
+    ),
+    "owner-need": re.compile(
+        rf"\b{_ATTR}\b[^.]{{0,40}}\b(?:needs?|needed|must|required|has to)\b"
+    ),
+    "owner-preference": re.compile(
+        rf"\b{_ATTR}\b[^.]{{0,60}}\b(?:prefers?|preferred|rather|instead)\b|\bprefers?\b"
+    ),
+    "owner-correction": re.compile(
+        rf"\bcorrection\s*\(\s*owner\s*\)|\byou(?:'re| are| were)?\s+(?:wrong|incorrect)\b"
+        rf"|\b{_ATTR}\s+(?:said|says|told\s+me)\b[^.]{{0,40}}\b(?:wrong|incorrect|mistake)\b"
+    ),
+}
+
+# Text the owner typed or pasted themselves (pi's `input` event) needs no
+# attribution: "ship it faster" is the owner's own voice even though the line
+# names no owner. Only `owner_authored=True` uses these, so journal prose
+# written by the agent is still judged by the attribution patterns above.
+_OWNER_AUTHORED = {
+    "owner-want": re.compile(
+        r"\b(?:i|we)\s+(?:want|wanted|would like|'d like|asked for|expect)\b"
+        r"|^\s*(?:please\s+)?(?:fix|add|build|implement|change|make|use|remove|rename|"
+        r"update|ensure|keep|drop|replace|ship|finish|land|wire|port)\b"
+    ),
+    "owner-need": re.compile(r"\b(?:i|we)\s+(?:need|needs|must|have to|require)\b"),
+    "owner-preference": re.compile(
+        r"\b(?:i|we)\s*(?:'d|would)?\s*(?:prefer|rather)\b|\bprefer\b|\binstead\b"
+    ),
+    "owner-correction": re.compile(
+        r"\b(?:you|it|that|this)\s+(?:is|was|are|were)\s+(?:wrong|incorrect)\b"
+        r"|\bthat'?s not what\b|\byou (?:broke|missed|forgot|ignored)\b"
+        r"|\bdo not do that again\b|\bstop (?:doing|adding|guessing|re-?running)\b"
+    ),
+}
 
 NUDGE_BY_TYPE = {
     "decision": "Nudge: re-read journal decisions before resuming work.",
@@ -56,6 +101,56 @@ def _normalise_text(value: object, cap: int) -> str:
         for char in raw
     )
     return " ".join(without_controls.split())[:cap].strip()
+
+
+def detect_intent(text: object, owner_authored: bool = False) -> list[str]:
+    """Return the owner-intent tags the text expresses, in INTENT_TAGS order.
+
+    Deterministic and query-free: the point is that a later session can find
+    what the owner wanted without reproducing today's wording. Attribution is
+    required for wants/needs (an agent's own "I want to check" is not owner
+    intent); a bare "prefer" counts because the owner writes it that way.
+
+    ``owner_authored=True`` relaxes the attribution requirement for text the
+    owner typed themselves (the pi `input` event), so a paraphrase with no
+    "owner"/"user" noun — "ship it faster", "I'd rather split this" — is still
+    captured. Callers must only set it for owner-typed text.
+    """
+    folded = _normalise_text(text, TEXT_CAP).casefold()
+    patterns = [
+        (tag, _INTENT_PATTERNS[tag], _OWNER_AUTHORED.get(tag) if owner_authored else None)
+        for tag in INTENT_TAGS
+    ]
+    return [
+        tag
+        for tag, attributed, first_person in patterns
+        if attributed.search(folded) or (first_person is not None and first_person.search(folded))
+    ]
+
+
+def _entry_intent(entry: dict) -> list[str]:
+    """Explicit owner-intent tags plus text detection (covers legacy rows)."""
+    tags = {tag.casefold() for tag in _normalise_tags(entry.get("tags"))}
+    detected = set(detect_intent(entry.get("text")))
+    return [tag for tag in INTENT_TAGS if tag in tags or tag in detected]
+
+
+def _merge_intent_tags(text: str, tags: list[str], notes: list[str]) -> list[str]:
+    """Tag a captured owner intent so a future session can find it by tag.
+
+    The reserved `agent` provenance tag is kept in the last slot, exactly like
+    tags_with_required: a capped tag list must never drop provenance and
+    promote a model note to trusted memory.
+    """
+    present = {tag.casefold() for tag in tags}
+    missing = [tag for tag in detect_intent(text) if tag.casefold() not in present]
+    if not missing:
+        return tags
+    notes.append("owner intent detected — tagged " + ", ".join(missing))
+    provenance = [tag for tag in tags if tag.casefold() == "agent"]
+    rest = [tag for tag in tags if tag.casefold() != "agent"]
+    room = max(0, TAG_COUNT_CAP - len(provenance))
+    return (missing + rest)[:room] + provenance
 
 
 def _normalise_tags(tags: object) -> list[str]:
@@ -95,6 +190,17 @@ def tags_with_required(tags: object, required: str) -> list[str]:
         raise ValueError("required journal tag must not be blank")
     clean = [tag for tag in _normalise_tags(tags) if tag != required_clean]
     return clean[:TAG_COUNT_CAP - 1] + [required_clean]
+
+
+def _supplied_tag(tags: object, wanted: str) -> bool:
+    """True when the caller's raw tag input named `wanted` (case-insensitive)."""
+    if isinstance(tags, str):
+        candidates: object = [tags]
+    elif isinstance(tags, (list, tuple, set)):
+        candidates = tags
+    else:
+        return False
+    return any(_normalise_text(tag, TAG_TEXT_CAP).casefold() == wanted for tag in candidates)
 
 
 def _validate_type(jtype: str | None) -> None:
@@ -156,6 +262,12 @@ def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
         raise ValueError("journal text must not be blank")
     notes: list[str] = []
     clean_tags = _fix_satisfaction_tags(_normalise_tags(tags), notes)
+    # The display cap must never drop provenance: a row that was written as an
+    # agent note stays unverified. Callers that use tags_with_required are
+    # already safe; a direct add() (CLI --tags) is not, until now.
+    if _supplied_tag(tags, "agent") and not any(t.casefold() == "agent" for t in clean_tags):
+        clean_tags = clean_tags[: TAG_COUNT_CAP - 1] + ["agent"]
+    clean_tags = _merge_intent_tags(clean_text, clean_tags, notes)
     _note_lesson_triggers(jtype, clean_tags, notes)
     entry = {
         "ts": store.now_ts(),
@@ -229,4 +341,63 @@ def render_recent(entries: list[dict], total: int, jtype: str | None = None) -> 
         tag_s = f" [{','.join(tags)}]" if tags else ""
         lines.append(f"{ts} · {entry_type} · {text}{tag_s}")
     lines.append("Nudge: re-read durable decisions and corrections before resuming work.")
+    return "\n".join(lines)
+
+
+def intent_with_total(
+    limit: int = READ_LIMIT_DEFAULT,
+) -> tuple[list[tuple[dict, list[str]]], int, dict[str, int]]:
+    """``(rows, total, counts)`` for owner-intent entries, oldest first.
+
+    Reads the journal once. A row counts when it carries an ``owner-*`` tag or
+    when its text detects as owner intent, so rows written before this view
+    existed are still captured. ``counts`` covers every row, not the page, so a
+    bounded render never lies about how much the owner asked for.
+    """
+    entries = [entry for entry in store.read_jsonl(store.journal_path()) if isinstance(entry, dict)]
+    classified = [(entry, _entry_intent(entry)) for entry in entries]
+    classified = [(entry, kinds) for entry, kinds in classified if kinds]
+    counts = {
+        tag: sum(1 for _entry, kinds in classified if tag in kinds) for tag in INTENT_TAGS
+    }
+    # Provenance split: how much of the profile is the owner's own record and how
+    # much is the agent's report of it (unverified). Without this a page of
+    # [agent] lines looks like owner authority.
+    counts["owner"] = sum(1 for entry, _kinds in classified if not _is_agent_entry(entry))
+    counts["agent"] = len(classified) - counts["owner"]
+    bounded = _bounded_limit(limit)
+    page = [] if bounded == 0 else classified[-bounded:]
+    return page, len(classified), counts
+
+
+def _is_agent_entry(entry: dict) -> bool:
+    """True when the row carries the reserved `agent` provenance tag."""
+    return "agent" in {tag.casefold() for tag in _normalise_tags(entry.get("tags"))}
+
+
+def render_intent(
+    rows: list[tuple[dict, list[str]]], total: int, counts: dict[str, int]
+) -> str:
+    """One line per owner statement, newest first, with per-kind counts."""
+    shown = rows[-READ_LIMIT_MAX:]
+    counts_s = " · ".join(
+        f"{tag.removeprefix('owner-')} {counts.get(tag, 0)}" for tag in INTENT_TAGS
+    )
+    lines = [
+        f"PC intent · {len(shown)} of {max(0, int(total))} owner statements · {counts_s}"
+        f" · owner {counts.get('owner', 0)} · agent {counts.get('agent', 0)}"
+    ]
+    for entry, kinds in reversed(shown):
+        ts = _normalise_text(entry.get("ts"), 32) or "unknown-time"
+        text = store.display_text(entry.get("text"), 160) or "(blank legacy entry)"
+        provenance = "agent" if _is_agent_entry(entry) else "owner"
+        lines.append(f"{kinds[0]} · {ts} · {text} [{provenance}]")
+    if not shown:
+        hint = "raise the limit" if total > 0 else "capture one with guard_note"
+        lines.append(f"Nudge: no owner statement shown — {hint}.")
+    else:
+        lines.append(
+            "Nudge: re-read the owner's wants, needs and corrections before acting; "
+            "agent lines stay unverified."
+        )
     return "\n".join(lines)

@@ -3,7 +3,7 @@
  * Pure logic — no pi imports.
  */
 
-import { closeSync, lstatSync, openSync, readSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export const UNTRACKED_MAX_FILES_SCANNED = 1_000;
@@ -28,9 +28,11 @@ export interface Numstat {
 export function parseNumstat(out: string): Numstat {
   const files: NumstatRow[] = [];
   for (const line of out.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-    const parts = trimmed.split("\t");
+    // Test emptiness on a trimmed copy but split the RAW line: trimming would
+    // silently strip leading/trailing whitespace that is part of a filename
+    // (mirrors diffscope.parse_numstat, which splits the untouched line).
+    if (line.trim() === "") continue;
+    const parts = line.split("\t");
     if (parts.length < 3) continue;
     const path = parts.slice(2).join("\t");
     const additions = parts[0] === "-" ? 0 : Number(parts[0]);
@@ -70,7 +72,16 @@ export function parseUntrackedPaths(out: string, activeStorePath: string | null 
     }
     paths.add(path);
   }
-  return [...paths].sort((a, b) => a.localeCompare(b));
+  return [...paths].sort(comparePaths);
+}
+
+/** Codepoint order (what Python's sorted() does). `localeCompare` is
+ *  locale-dependent and punctuation-insensitive, so it could order the bounded
+ *  untracked scan differently and change which files the line budget reaches. */
+function comparePaths(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 }
 
 export interface UntrackedScan {
@@ -121,6 +132,20 @@ export function scanUntrackedFiles(root: string, paths: string[], hardLineBudget
     try {
       const stat = lstatSync(candidate);
       if (stat.isSymbolicLink() || !stat.isFile()) {
+        skippedFiles += 1;
+        continue;
+      }
+      // The lexical check above cannot see a symlinked PARENT directory: a git
+      // path is relative to the root by construction, but `link/secret.txt` can
+      // still resolve outside it. Compare resolved paths before reading (this
+      // also keeps a repo reached through a symlink, e.g. /tmp on macOS).
+      const realRel = relative(realpathSync(rootAbs), realpathSync(candidate));
+      if (
+        realRel === "" ||
+        realRel === ".." ||
+        isAbsolute(realRel) ||
+        realRel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+      ) {
         skippedFiles += 1;
         continue;
       }
@@ -224,9 +249,19 @@ export interface DiffThresholds {
   diff_warn_files: number;
 }
 
-/** Verdict of a diff against configured thresholds (SPEC §1 #8). */
-export function diffVerdict(lines: number, files: number, t: DiffThresholds): DiffVerdict {
+/** Verdict of a diff against configured thresholds (SPEC §1 #8).
+ *  `scanLimited` marks a bounded untracked scan: the line count is then a lower
+ *  bound, and an incomplete count can never be declared ok (mirrors
+ *  diffscope.verdict, which promotes every limited scan to warn). */
+export function diffVerdict(
+  lines: number,
+  files: number,
+  t: DiffThresholds,
+  scanLimited = false,
+): DiffVerdict {
   if (lines >= t.diff_hard_lines) return { level: "hard", lines, files };
-  if (lines >= t.diff_warn_lines || files >= t.diff_warn_files) return { level: "warn", lines, files };
+  if (lines >= t.diff_warn_lines || files >= t.diff_warn_files || scanLimited) {
+    return { level: "warn", lines, files };
+  }
   return { level: "ok", lines, files };
 }

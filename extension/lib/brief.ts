@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { Constraint } from "./defaults.ts";
 import type { LoopInfo } from "./loops.ts";
 import { normalizeOneLine, trunc } from "./text.ts";
+import { hasAgentTag } from "./journal.ts";
 
 export function sha1Hex(s: string): string {
   return createHash("sha1").update(s, "utf8").digest("hex");
@@ -38,6 +39,10 @@ export interface BriefInput {
    *  BRIEF_MAX_RECALL are injected when a tag matches the owner task and the
    *  entry is not already visible in the capped sections. */
   recallPool?: Array<{ type: string; text: string; tags: string[] }>;
+  /** Owner statements (wants, needs, preferences, corrections), newest first.
+   *  A row without the `agent` tag is the owner's own; an agent-tagged row is
+   *  labelled unverified so it never reads as owner authority. */
+  ownerIntent?: Array<{ type: string; text: string; tags: string[] }>;
   loops: LoopInfo[];
   /** `label` is required: a masked exit 0 must never render like a clean one. */
   lastEvidence: {
@@ -56,6 +61,9 @@ export const BRIEF_MAX_AGENT_NOTES = 2;
 export const BRIEF_MAX_LOOPS = 2;
 /** Trusted tag matches injected when the owner task names a journal tag the caps hid. */
 export const BRIEF_MAX_RECALL = 2;
+/** Owner statements re-injected every turn: what the owner asked for outranks
+ *  any agent paraphrase of it, but the brief is a brief. */
+export const BRIEF_MAX_INTENT = 2;
 /** Owner task display cap (chars). 400 so a multi-part request keeps its tail;
  *  the brief is digest-gated, so the extra bytes are paid only on change. */
 export const TASK_DISPLAY_MAX = 400;
@@ -273,6 +281,27 @@ export function buildBrief(input: BriefInput): string {
       // the model knows constraints exist beyond the injected 12 (goal #1).
       lines.push(`+${hidden} more constraints hidden — run /guard-contract list`);
     }
+  }
+
+  // What the owner actually asked for, newest first. This is the line a new
+  // session would otherwise have to reconstruct by reading the whole journal;
+  // rows already visible in the journal sections above are skipped.
+  const alreadyVisible = visibleJournalText(
+    input.precedents ?? [],
+    input.decisions ?? [],
+    input.corrections,
+  );
+  const intents = (input.ownerIntent ?? []).filter(
+    (entry) => !alreadyVisible.has(normalizeOneLine(entry.text, 10_000)),
+  );
+  if (intents.length > 0) {
+    lines.push("owner intent:");
+    for (const entry of intents.slice(0, BRIEF_MAX_INTENT)) {
+      const unverified = hasAgentTag(entry.tags) ? " (unverified)" : "";
+      lines.push(`- ${truncLine(entry.text, AGENT_NOTE_DISPLAY_MAX)}${unverified}`);
+    }
+    const more = intents.length - Math.min(intents.length, BRIEF_MAX_INTENT);
+    if (more > 0) lines.push(`+${more} more owner statements — guard_intent lists them`);
   }
 
   const sections = [

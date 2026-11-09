@@ -287,6 +287,24 @@ def test_past_command_is_reusable_from_the_events_ledger():
     assert "re-run to verify" in recall.render(result)
 
 
+def test_past_command_is_reusable_without_supplied_rows(write_events):
+    # CLI and MCP call search() with no rows, so the events ledger is read from
+    # disk. Regression: `supplied` was computed AFTER the journal/evidence rows
+    # were loaded (never None by then), so event_rows was always empty and
+    # command reuse silently never worked outside tests.
+    write_events(
+        [
+            {"kind": "tool_call", "tool": "bash", "cmd": "rsync -a src/ /backup/folder/"},
+            {"kind": "tool_call", "tool": "bash", "cmd": "rsync -a src/ /backup/folder/"},
+        ]
+    )
+    result = recall.search("copy folder backup")
+    commands = [hit for hit in result.hits if hit.kind == "command"]
+    assert len(commands) == 1
+    assert commands[0].cmd == "rsync -a src/ /backup/folder/"
+    assert commands[0].uses == 2
+
+
 def test_a_command_already_in_evidence_is_not_repeated():
     events = [{"ts": "2026-11-01T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "npm test"}]
     evidence = [{"id": "ev-0001", "ts": "2026-11-01T00:00:00.000Z", "cmd": "npm test", "digest": "", "exit": 0}]

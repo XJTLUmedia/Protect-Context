@@ -96,15 +96,17 @@ test("compaction recovery: mid-run re-assertion, journal read path, task anchor"
     const journalTool = pi.tools.get("guard_journal");
     assert.ok(journalTool, "pi exposes a read path for the journal");
     const read = textOf(await journalTool.execute("j1", {}, null, null, ctx));
-    assert.match(read, /^PC journal · last 1 of 1/);
+    // Two rows: the owner's own directive prompt is captured as a trusted note
+    // (owner-want), plus the model's agent-tagged decision above.
+    assert.match(read, /^PC journal · last 2 of 2/);
     assert.match(read, /rejected approach: retry the flaky suite/);
     assert.match(read, /Nudge: re-read durable decisions and corrections/);
     const typed = textOf(await journalTool.execute("j2", { type: "correction", limit: 20 }, null, null, ctx));
     assert.match(typed, /^PC journal correction · last 0 of 0/);
     const clamped = textOf(await journalTool.execute("j3", { limit: 500 }, null, null, ctx));
-    assert.match(clamped, /last 1 of 1/, "limit is bounded, not trusted");
+    assert.match(clamped, /last 2 of 2/, "limit is bounded, not trusted");
     const empty = textOf(await journalTool.execute("j4", { limit: 0 }, null, null, ctx));
-    assert.match(empty, /last 0 of 1/);
+    assert.match(empty, /last 0 of 2/);
 
     // --- owner override wins over prompt capture -------------------------
     await pi.commands.get("guard-task").handler("Ship the audit fixes", ctx);
@@ -139,7 +141,7 @@ test("compaction recovery: mid-run re-assertion, journal read path, task anchor"
 
     // --- status surfaces the journal, so the read path is discoverable ---
     const status = textOf(await pi.tools.get("guard_status").execute("s1", {}, null, null, ctx));
-    assert.match(status, /journal: 1 entries \(1 agent\) — guard_journal reads them/);
+    assert.match(status, /journal: 2 entries \(1 agent\) — guard_journal reads them/);
 
     // --- the task anchor stores exactly what the brief can show ----------
     await pi.commands.get("guard-task").handler(`long ${"w".repeat(400)}`, ctx);

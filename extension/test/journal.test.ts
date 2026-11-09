@@ -8,6 +8,9 @@ import {
   appendJournal,
   boundedReadLimit,
   countJournal,
+  detectIntent,
+  hasAgentTag,
+  intentWithTotal,
   readJournal,
   READ_LIMIT_DEFAULT,
   READ_LIMIT_MAX,
@@ -15,6 +18,8 @@ import {
   recentCorrections,
   recentDecisions,
   recentJournal,
+  recentTrustedEntries,
+  renderIntent,
   renderJournal,
   sanitizeTags,
   tagsWithRequired,
@@ -78,6 +83,40 @@ test("journal: agent notes are readable, risk entries are not memory", () => {
   assert.deepEqual(recentAgentEntries(journal, 0), [], "no agent notes without a positive cap");
 });
 
+test("journal: rejects an unknown type at runtime (no unreadable rows)", () => {
+  const dir = tmpStore();
+  try {
+    assert.throws(
+      () => appendJournal(dir, { type: "lesson" as never, text: "not a frozen type" }),
+      /unknown journal type/,
+    );
+    assert.deepEqual(readJournal(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("journal: the reserved agent tag is matched case-insensitively, past the display cap", () => {
+  const tags = ["Agent"];
+  assert.equal(hasAgentTag(tags), true, "a stored `Agent` tag is provenance too");
+  assert.equal(hasAgentTag([...Array.from({ length: 10 }, (_, i) => `t${i}`), "AGENT"]), true);
+  assert.equal(hasAgentTag(["agentic"]), false);
+  const journal = [
+    { ts: "1", type: "decision" as const, text: "owner row", tags: ["scope"] },
+    { ts: "2", type: "decision" as const, text: "model row", tags: ["Agent"] },
+  ];
+  assert.deepEqual(recentDecisions(journal, 5).map((entry) => entry.text), ["owner row"]);
+  assert.deepEqual(recentAgentEntries(journal, 5).map((entry) => entry.text), ["model row"]);
+});
+
+test("journal: a zero cap selects no trusted rows", () => {
+  const journal = [
+    { ts: "1", type: "decision" as const, text: "one", tags: [] },
+    { ts: "2", type: "decision" as const, text: "two", tags: [] },
+  ];
+  assert.deepEqual(recentTrustedEntries(journal, "decision", 0), []);
+});
+
 test("journal: read limit is bounded like the Python boundary", () => {
   assert.equal(boundedReadLimit(undefined), READ_LIMIT_DEFAULT);
   assert.equal(boundedReadLimit(500), READ_LIMIT_MAX);
@@ -113,4 +152,72 @@ test("journal: render is one line per entry with a Nudge tail", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("journal: owner intent is detected without a query (mirrors journal.detect_intent)", () => {
+  assert.deepEqual(detectIntent("owner wants the broad fix"), ["owner-want"]);
+  assert.deepEqual(detectIntent("the user needs both runtimes green"), ["owner-need"]);
+  assert.deepEqual(detectIntent("I prefer minimal diffs"), ["owner-preference"]);
+  assert.deepEqual(detectIntent("CORRECTION (owner): you are wrong about tags"), [
+    "owner-correction",
+  ]);
+  // An agent's own plan is not owner intent, and neither is a plain result.
+  assert.deepEqual(detectIntent("I want to check the ledger"), []);
+  assert.deepEqual(detectIntent("ran pytest: 258 passed"), []);
+});
+
+test("journal: owner-authored text needs no attribution (paraphrase is captured)", () => {
+  // Only the owner's own prompt may relax the attribution rule; journal prose
+  // written by the agent must still require an owner/user noun.
+  assert.deepEqual(detectIntent("ship it faster", true), ["owner-want"]);
+  assert.deepEqual(detectIntent("ship it faster"), []);
+  assert.deepEqual(detectIntent("I'd rather split this into two commits", true), [
+    "owner-preference",
+  ]);
+  assert.deepEqual(detectIntent("I need both runtimes green", true), ["owner-need"]);
+  assert.deepEqual(detectIntent("this is wrong", true), ["owner-correction"]);
+  assert.deepEqual(detectIntent("unrelated bookkeeping", true), []);
+});
+
+test("journal: a captured owner intent is tagged, and provenance survives the cap", () => {
+  const dir = tmpStore();
+  try {
+    const entry = appendJournal(dir, { type: "correction", text: "owner wants the broad fix", tags: ["agent"] });
+    assert.deepEqual(entry.tags, ["owner-want", "agent"]);
+
+    const crowded = appendJournal(dir, {
+      type: "note",
+      text: "owner needs the audit",
+      tags: [...Array.from({ length: 10 }, (_, i) => `t${i}`), "agent"],
+    });
+    assert.equal(crowded.tags.length, TAG_COUNT_CAP);
+    assert.equal(crowded.tags.at(-1), "agent", "provenance survives a full tag list");
+    assert.equal(crowded.tags[0], "owner-need");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("journal: intent view groups counts, labels provenance and bounds the page", () => {
+  const rows = [
+    { ts: "2026-01-01T00:00:00Z", type: "decision" as const, text: "owner approved layering", tags: ["agent"] },
+    { ts: "2026-01-02T00:00:00Z", type: "note" as const, text: "owner prefers broad fixes", tags: [] },
+    { ts: "2026-01-03T00:00:00Z", type: "note" as const, text: "unrelated entry", tags: [] },
+  ];
+  const { rows: page, total, counts } = intentWithTotal(rows, 5);
+  const text = renderIntent(page, total, counts);
+  assert.equal(total, 2);
+  assert.equal(counts["owner-want"], 1);
+  assert.equal(counts["owner-preference"], 1);
+  assert.match(text.split("\n")[0]!, /^PC intent · 2 of 2 owner statements · want 1 · need 0 · preference 1 · correction 0 · owner 1 · agent 1$/);
+  assert.match(text, /\[agent\]/);
+  assert.match(text, /\[owner\]/);
+  // Newest first, so today's want is easier to act on than last week's.
+  assert.ok(text.indexOf("owner-preference") < text.indexOf("owner-want"));
+  assert.match(text.split("\n").at(-1)!, /^Nudge: /);
+
+  const zero = intentWithTotal(rows, 0);
+  const zeroText = renderIntent(zero.rows, zero.total, zero.counts);
+  assert.match(zeroText, /0 of 2 owner statements/);
+  assert.match(zeroText, /raise the limit/);
 });

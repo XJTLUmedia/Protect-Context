@@ -67,6 +67,31 @@ test("state: a legacy flat file is migrated in memory", () => {
   });
 });
 
+test("state: unknown top-level keys survive a load/save round trip", () => {
+  withCwd((cwd) => {
+    mkdirSync(join(cwd, ".agent-guard"), { recursive: true });
+    writeFileSync(
+      statePath(cwd),
+      JSON.stringify({
+        current_session: { id: "s", started: "2026-10-01T00:00:00Z", git_head: null },
+        sessions: {},
+        counters: {},
+        future_flag: { enabled: true },
+        brief_digest: "old-digest",
+        notify_watermarks: { ctx_pct: 30, diff_lines: 0, diff_files: 0 },
+      }),
+      "utf8",
+    );
+    const state = loadState(cwd)!;
+    assert.deepEqual(state.future_flag, { enabled: true }, "a key another surface wrote is kept");
+    saveState(cwd, state);
+    const saved = JSON.parse(readFileSync(statePath(cwd), "utf8")) as Record<string, unknown>;
+    assert.deepEqual(saved.future_flag, { enabled: true });
+    assert.equal("brief_digest" in saved, false, "the migrated legacy pair is not re-emitted");
+    assert.equal("notify_watermarks" in saved, false);
+  });
+});
+
 test("state: save prunes old sessions but never the current one", () => {
   withCwd((cwd) => {
     const state = defaultState("s-0", null);

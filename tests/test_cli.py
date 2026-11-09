@@ -146,7 +146,27 @@ def test_journal_reads_recent_entries_and_filters_type(capsys):
     assert "Use rg, not grep" not in out
 
 
+# ---- intent -----------------------------------------------------------------
+
+
+def test_intent_lists_owner_wants_needs_and_corrections(capsys):
+    journal.add("decision", "owner wants both runtimes green", ["agent"])
+    journal.add("correction", "CORRECTION (owner): the stored tags were wrong")
+
+    assert main(["intent", "--limit", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "PC intent · 2 of 2 owner statements" in out
+    assert "want 1" in out and "correction 1" in out
+    assert "owner-correction · " in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+    assert main(["intent", "--limit", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "0 of 2 owner statements" in out and "raise the limit" in out
+
+
 # ---- recall -----------------------------------------------------------------
+
 
 def test_recall_filters_keywords_tags_and_evidence_id(capsys):
     journal.add("decision", "Prefer ripgrep for search", ["search"])

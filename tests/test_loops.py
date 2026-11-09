@@ -61,6 +61,31 @@ def test_verify_outcomes_feed_streaks():
     assert loops.streaks() == [{"cmd": "false", "count": 2}]
 
 
+def test_mirrored_verify_events_never_double_count(write_events):
+    """verify.run_verify writes an events row AND a ledger row for one attempt.
+
+    The ledger is authoritative for the outcome; counting both would block the
+    command after half as many real failures.
+    """
+    mirror = {"kind": "tool_result", "tool": "guard_verify", "ok": False,
+              "cmd": "pytest -q", "exit": 1, "session": "test-session"}
+    write_events([mirror, dict(mirror)])
+    store.append_jsonl(
+        store.verify_path(),
+        {
+            "id": "ev-0001",
+            "ts": store.now_ts(),
+            "session": "test-session",
+            "cmd": "pytest -q",
+            "exit": 1,
+            "ok": False,
+            "digest": "",
+            "ms": 1,
+        },
+    )
+    assert loops.streaks() == [{"cmd": "pytest -q", "count": 1}]
+
+
 def test_verify_success_resets_streak(tmp_path):
     from protect_context import verify
 

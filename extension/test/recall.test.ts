@@ -270,3 +270,57 @@ test("recall: a read tool leaves a reusable file hint", () => {
   assert.equal(hit?.tool, "read");
   assert.match(renderRecall(result), /read · reuse · used 2×/);
 });
+
+test("recall: a non-ASCII letter also ends a word (mirrors Python str.isalnum)", () => {
+  assert.equal(wordHit("naïold", "old"), false);
+  assert.equal(wordHit("表格old", "old"), false);
+  assert.equal(wordHit("a — old", "old"), true);
+  assert.equal(wordHit("😀old", "old"), true, "an emoji is not an alphanumeric character");
+});
+
+test("recall: a result is paired with its own command, never another tool's", () => {
+  const events = [
+    { ts: "t1", kind: "tool_call", session: "s", tool: "bash", cmd: "make build", ok: null },
+    { ts: "t2", kind: "tool_result", session: "s", tool: "read", cmd: "src/x.py", ok: true },
+  ];
+  const result = searchRows([], [], { query: "make build" }, events);
+  const command = result.hits.find((hit) => hit.kind === "command");
+  assert.equal(command?.cmd, "make build");
+  assert.equal(command?.lastOk, null, "a read result proves nothing about the bash command");
+
+  const paired = [
+    { ts: "t3", kind: "tool_call", session: "s", tool: "bash", cmd: "make build", ok: null },
+    { ts: "t4", kind: "tool_result", session: "s", tool: "bash", cmd: "make build", ok: false, exit: 1 },
+  ];
+  const matched = searchRows([], [], { query: "make build" }, paired).hits.find(
+    (hit) => hit.kind === "command",
+  );
+  assert.equal(matched?.lastOk, false);
+  assert.equal(matched?.lastExit, 1);
+});
+
+test("recall: searchStore reads the events ledger for a keyword query", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-recall-events-"));
+  try {
+    mkdirSync(join(dir, ".agent-guard"));
+    writeFileSync(
+      join(dir, ".agent-guard", "events.jsonl"),
+      `${JSON.stringify({ ts: "t", session: "s", kind: "tool_call", tool: "bash", cmd: "rsync -a src/ /backup/" })}\n`,
+    );
+    const found = searchStore(dir, { query: "rsync" });
+    assert.equal(found.hits.length, 1);
+    assert.equal(found.hits[0]?.kind, "command");
+    // A cmd-only filter narrows to evidence rows (mirrors recall._cmd_bonus),
+    // so no command hint can match it.
+    assert.equal(searchStore(dir, { cmd: "rsync" }).hits.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recall: a case-variant Agent tag stays unverified", () => {
+  const rows = [{ ts: "t", type: "note", text: "model reasoning", tags: ["Agent"] }];
+  const hit = searchRows(rows, [], { query: "reasoning" }).hits[0];
+  assert.equal(hit?.provenance, "agent", "a stored `Agent` tag is not owner authority");
+  assert.deepEqual(trustedRecallPool([{ ts: "t", type: "note", text: "x", tags: ["Agent"] }]), []);
+});

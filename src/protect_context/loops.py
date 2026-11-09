@@ -8,8 +8,12 @@ once prior failures for the fingerprint reach loop_block_after - 1; this
 module reports the same arithmetic.
 
 guard_verify outcomes are merged into the streaks too (ok=False → +1,
-ok=True → reset): the suite's own evidence tool must not be an escape hatch
-from goal #9. verify_runs.jsonl already stores `cmd`, so no §2 change.
+ok=True → reset): the suite's own evidence tool must not be an escape hatch.
+verify_runs.jsonl already stores `cmd`, so no §2 change was needed there. Every
+verify run is also mirrored into events.jsonl as a tool_call/tool_result pair so
+recall and budget see MCP- and CLI-only work; those mirrored rows are skipped
+here because the evidence ledger is authoritative for the outcome, and counting
+both would charge one attempt twice.
 
 Streak identity is the frozen fingerprint plus a comparison key: a trailing
 ``;`` outside quotes is ignored (``pytest -q`` and ``pytest -q;`` share a
@@ -23,7 +27,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from . import store, verify
-
 
 # Tools whose runs may accumulate a streak. Everything else only records a
 # reuse key for recall.
@@ -47,6 +50,17 @@ def _timestamp_key(value: object, position: int) -> tuple:
         return (0, parsed.timestamp(), position)
     except (TypeError, ValueError, OverflowError):
         return (1, raw, position)
+
+
+def _is_ledger_mirror(event: dict) -> bool:
+    """True for an events row that only mirrors an evidence-ledger outcome.
+
+    ``verify.run_verify`` appends one ``tool_result`` row per run so every
+    interface (MCP, CLI, pi) has command history in events.jsonl. verify_runs
+    stays authoritative for the outcome: counting both would charge the same
+    attempt twice and block a command after half as many real failures.
+    """
+    return event.get("kind") == "tool_result" and event.get("tool") == "guard_verify"
 
 
 def _verify_outcomes(session: str) -> list[dict]:
@@ -85,7 +99,11 @@ def streaks(events: list[dict] | None = None, session: str | None = None) -> lis
     """
     session = session or store.session_id()
     if events is None:
-        combined = store.read_jsonl(store.events_path()) + _verify_outcomes(session)
+        combined = [
+            event
+            for event in store.read_jsonl(store.events_path())
+            if not _is_ledger_mirror(event)
+        ] + _verify_outcomes(session)
         events = [
             event
             for _position, event in sorted(

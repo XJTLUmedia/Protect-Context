@@ -284,6 +284,24 @@ def test_untracked_backslash_paths_are_counted_on_posix(tmp_path):
     assert scan["skipped_files"] == 0
 
 
+def test_a_symlinked_parent_cannot_escape_the_repository(tmp_path):
+    """A git path is root-relative, so only resolving both sides proves the
+    read stays inside: `link/secret.txt` is lexically inside while the bytes
+    live outside."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    scan = diffscope._scan_untracked(root.resolve(), ["link/secret.txt"], 800)
+    assert scan["lines"] == 0, "the outside file must not be counted"
+    assert scan["files_scanned"] == 0
+    assert scan["skipped_files"] == 1
+    assert scan["scan_limited"] is True, "an unread path makes the count incomplete"
+
+
 def test_partial_cfg_falls_back_to_builtin_defaults():
     """diff_audit accepts a partial cfg (public signature) without KeyError."""
     from protect_context.defaults import DEFAULT_CONFIG

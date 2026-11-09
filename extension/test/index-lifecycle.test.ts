@@ -21,6 +21,8 @@ class FakePi {
   lastShellSignal: AbortSignal | undefined;
   failStatus = false;
   failDiff = false;
+  /** Exit code for `sh` (guard_verify/bash runs); 0 means success. */
+  shellCode = 0;
 
   on(name: string, handler: Handler): void {
     this.handlers.set(name, handler);
@@ -41,6 +43,9 @@ class FakePi {
   ): Promise<{ code: number; stdout: string; stderr: string; killed: boolean }> {
     if (command === "sh") {
       this.lastShellSignal = options?.signal;
+      if (this.shellCode !== 0) {
+        return { code: this.shellCode, stdout: "", stderr: "failed\n", killed: false };
+      }
       return { code: 0, stdout: "verified\n", stderr: "", killed: false };
     }
     assert.equal(command, "git");
@@ -138,7 +143,11 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     assert.doesNotMatch(afterOwnerNote.message.content, /decisions:\n- model-only decision/);
     const entries = readJournal(dir);
     assert.ok(entries[0]?.tags.includes("agent"), "model tool always records agent provenance");
-    assert.deepEqual(entries[1]?.tags, [], "slash command remains trusted");
+    assert.ok(!entries[1]?.tags.includes("agent"), "slash command remains trusted");
+    assert.ok(
+      entries[1]?.tags.includes("owner-want"),
+      "an owner-approved decision is tagged as owner intent",
+    );
 
     const slashContract = fake.commands.get("guard-contract");
     assert.ok(slashContract);
@@ -165,7 +174,11 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
       { toolCallId: "bad", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "cancelled" }] } },
       ctx,
     );
-    const results = readJsonl<EventRecord>(eventsPath(dir)).filter((event) => event.kind === "tool_result");
+    const results = readJsonl<EventRecord>(eventsPath(dir)).filter(
+      // guard_verify writes its own mirrored pair from runVerifyAndRecord; this
+      // assertion is about the bash outcome shape.
+      (event) => event.kind === "tool_result" && event.tool === "bash",
+    );
     assert.deepEqual(
       results.map((event) => ({ cmd: event.cmd, exit: event.exit, ok: event.ok })),
       [
@@ -216,7 +229,8 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     assert.equal(blocked.block, true);
     assert.match(blocked.reason, /already failed 2 times/);
     const calls = readJsonl<EventRecord>(eventsPath(dir)).filter(
-      (event) => event.kind === "tool_call",
+      // guard_verify mirrors its own pair from runVerifyAndRecord.
+      (event) => event.kind === "tool_call" && event.tool === "bash",
     );
     assert.deepEqual(
       calls.map((event) => ({ cmd: event.cmd, ok: event.ok })),
@@ -256,6 +270,121 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     await handler(fake, "turn_end")({}, ctx);
     await handler(fake, "session_shutdown")({}, ctx);
     assert.equal(uiAccesses, 0, "no ctx.ui property is touched when hasUI=false");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("index lifecycle: guard_intent renders owner intent without a query", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-index-intent-"));
+  try {
+    const fake = new FakePi();
+    fake.cwd = dir;
+    protectContext(fake as unknown as ExtensionAPI);
+    const ctx = {
+      cwd: dir,
+      hasUI: false,
+      sessionManager: { getSessionId: () => "session-intent" },
+      getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+    };
+    await handler(fake, "session_start")({}, ctx);
+
+    const note = fake.tools.get("guard_note");
+    assert.ok(note);
+    await note.execute(
+      "n1",
+      { type: "decision", text: "owner wants both runtimes green", tags: [] },
+      null,
+      null,
+      ctx,
+    );
+    await note.execute("n2", { type: "note", text: "unrelated bookkeeping", tags: [] }, null, null, ctx);
+
+    const intent = fake.tools.get("guard_intent");
+    assert.ok(intent, "guard_intent is model-callable");
+    const text = (await intent.execute("i1", { limit: 5 }, null, null, ctx)).content[0].text;
+    assert.match(text, /^PC intent · 1 of 1 owner statements · want 1/);
+    assert.match(text, /owner-want · .*owner wants both runtimes green \[agent\]/);
+    assert.match(text.split("\n").at(-1)!, /^Nudge: /);
+
+    // The owner's own typed directive is captured as a TRUSTED row: the words
+    // are the owner's, so the profile does not depend on the agent's paraphrase.
+    await handler(fake, "input")(
+      { source: "user", text: "ship it faster, the whole release pipeline" },
+      ctx,
+    );
+    // A later prompt still states intent even though the task anchor is set.
+    await handler(fake, "input")(
+      { source: "user", text: "I need both suites green before you push" },
+      ctx,
+    );
+    const owned = (await intent.execute("i2", { limit: 5 }, null, null, ctx)).content[0].text;
+    assert.match(owned, /owner-want · .*ship it faster.*\[owner\]/);
+    assert.match(owned, /owner 2 · agent 1/);
+
+    // The brief carries the owner's statements too, so they survive compaction
+    // without a tool call (both rows are notes, so they are unique here).
+    const brief = (await handler(fake, "before_agent_start")({}, ctx)) as any;
+    assert.match(brief.message.content, /owner intent:/);
+    assert.match(brief.message.content, /- ship it faster/);
+    assert.match(brief.message.content, /- I need both suites green before you push/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("index lifecycle: a failing guard_verify counts once and blocks its own re-run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-index-verify-count-"));
+  try {
+    const fake = new FakePi();
+    fake.cwd = dir;
+    fake.shellCode = 1; // every verification run fails
+    protectContext(fake as unknown as ExtensionAPI);
+    const ctx = {
+      cwd: dir,
+      hasUI: false,
+      sessionManager: { getSessionId: () => "session-verify-count" },
+      getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+    };
+    await handler(fake, "session_start")({}, ctx);
+
+    const verify = fake.tools.get("guard_verify");
+    assert.ok(verify);
+    const start = handler(fake, "tool_execution_start");
+    const end = handler(fake, "tool_execution_end");
+    // Drive the tool exactly as pi does: start -> execute -> end.
+    const run = async (id: string) => {
+      await start({ toolCallId: id, toolName: "guard_verify", args: { command: "pytest -q" } }, ctx);
+      const out = (await verify.execute(id, { command: "pytest -q" }, null, null, ctx)).content[0].text;
+      await end(
+        { toolCallId: id, toolName: "guard_verify", isError: false, result: { content: [{ type: "text", text: out }] } },
+        ctx,
+      );
+      return out as string;
+    };
+
+    // loop_block_after is 3, so the threshold is two prior failures: the first
+    // two runs execute and the third is refused. Counting the outcome twice (or
+    // resetting it with `!isError` at tool_execution_end) breaks this exactly.
+    assert.match(await run("gv1"), /PC verify ev-0001/);
+    assert.match(await run("gv2"), /PC verify ev-0002/);
+    assert.match(await run("gv3"), /already failed 2 times|do not re-run/);
+    const runs = readJsonl<{ id: string }>(verifyRunsPath(dir));
+    assert.equal(runs.length, 2, "a blocked run records no evidence");
+
+    // events.jsonl tells the truth about a failed verify: the extension used to
+    // write ok=!isError (true here) with exit null from tool_execution_end.
+    const mirrored = readJsonl<EventRecord>(eventsPath(dir)).filter((e) => e.tool === "guard_verify");
+    assert.deepEqual(
+      mirrored.map((e) => [e.kind, e.ok, e.exit]),
+      [
+        ["tool_call", null, null],
+        ["tool_result", false, 1],
+        ["tool_call", null, null],
+        ["tool_result", false, 1],
+      ],
+      "two failing runs leave two truthful call/result pairs",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

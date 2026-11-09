@@ -384,6 +384,36 @@ def guard_journal(
 
 
 @mcp.tool(annotations=_READ_ONLY)
+def guard_intent(
+    limit: Annotated[
+        int,
+        Field(
+            description=(
+                "How many owner statements to return. Integer. Default 5. "
+                "Clamped to 0–20; 0 returns the header, counts and nudge only."
+            )
+        ),
+    ] = journal.READ_LIMIT_DEFAULT,
+) -> str:
+    """Owner wants, needs, preferences, and corrections from the journal.
+
+    Use it to answer "what does the owner want" without guessing keywords:
+    every row whose text expresses an owner want, need, or preference, or an
+    explicit "you are wrong" correction, plus rows already carrying the tags
+    `owner-want`, `owner-need`, `owner-preference`, or `owner-correction`.
+    Rows written before those tags existed are classified from their text, so
+    nothing is lost. Each line is `<kind> · <ts> · <text> [<provenance>]`,
+    where provenance `owner` is a trusted row and `agent` is model-recorded and
+    still unverified. `limit` is an int, default 5, clamped to 0–20. It returns
+    `PC intent · N of M owner statements`, per-kind counts, and a Nudge. Side
+    effects: none. It does not create `.agent-guard/`, does not append, and does
+    not promote agent rows to trusted memory.
+    """
+    rows, total, counts = journal.intent_with_total(limit)
+    return journal.render_intent(rows, total, counts)
+
+
+@mcp.tool(annotations=_READ_ONLY)
 def guard_recall(
     query: Annotated[
         str,

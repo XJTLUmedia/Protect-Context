@@ -121,6 +121,28 @@ test("loops: restart reconstruction merges same-session bash events and verify l
   assert.equal(reset.has("npm test"), false, "later verify success resets earlier bash failure");
 });
 
+test("loops: a mirrored guard_verify event never double-counts the ledger row", () => {
+  // verify.run_verify writes an events row AND a ledger row for one attempt.
+  // The ledger is authoritative: counting both would trip the brake after half
+  // the real failures.
+  const mirror = toolResultEvent(S, "guard_verify", { ok: false, ms: 1, outChars: 0, cmd: "pytest -q", exit: 1 });
+  const ledger: VerifyRun = {
+    id: "ev-0001",
+    ts: "2026-09-01T00:00:02.000Z",
+    session: S,
+    cmd: "pytest -q",
+    exit: 1,
+    ok: false,
+    digest: "",
+    ms: 1,
+  };
+  const map = failedAttemptsFromLedgers([mirror], [ledger], S);
+  assert.equal(map.get("pytest -q")?.failures, 1);
+  // The bash path is untouched: a real bash failure still counts.
+  const both = failedAttemptsFromLedgers([mirror, ev(S, "pytest -q", false, 1)], [ledger], S);
+  assert.equal(both.get("pytest -q")?.failures, 2);
+});
+
 test("loops: cross-runtime ISO offsets are ordered as instants, not raw strings", () => {
   const events = [ev(S, "npm test", true, 0)];
   events[0]!.ts = "2026-09-01T00:00:00.900+00:00";
@@ -209,4 +231,21 @@ test("loops: piped verify runs count as unproven; a plain bash success still res
   // so it must not invent a streak either.
   const bash = failedAttempts([ev(S, "git log | head", true, 0)], S);
   assert.equal(bash.size, 0);
+});
+
+test("loops: non-shell reuse keys never become command streaks", () => {
+  // A `read` tool's cmd is a path, not a command: Python's loops.streaks skips
+  // it, and a streak that can never block would still be reported as one.
+  const reads = [
+    toolResultEvent(S, "read", { ok: false, ms: 1, outChars: 0, cmd: "src/store.py", exit: 1 }),
+    toolResultEvent(S, "read", { ok: false, ms: 1, outChars: 0, cmd: "src/store.py", exit: 1 }),
+  ];
+  assert.equal(failedAttempts(reads, S).size, 0);
+  assert.equal(failedAttemptsFromLedgers(reads, [], S).size, 0);
+
+  const live = new Map<string, ReturnType<typeof openLoopsFromMap>[number]>();
+  noteLoopOutcome(live, "src/store.py", false, 1, "read");
+  assert.equal(live.size, 0, "the live path applies the same tool filter");
+  noteLoopOutcome(live, "src/store.py", false, 1, "bash");
+  assert.equal(live.size, 1, "the same text run as a shell command still counts");
 });
