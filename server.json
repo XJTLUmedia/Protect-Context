@@ -3,9 +3,11 @@
   "name": "io.github.XJTLUmedia/protect-context",
   "title": "protect-context",
   "description": "Agent guardrails: contract, evidence ledger, loop brake, diff-scope warnings, durable journal.",
+  "websiteUrl": "https://github.com/XJTLUmedia/Protect-Context",
   "repository": {
-    "url": "https://github.com/XJTLUmedia/Protect-Context-Pi-Coding-Agent",
-    "source": "github"
+    "url": "https://github.com/XJTLUmedia/Protect-Context",
+    "source": "github",
+    "id": "1421530469"
   },
   "version": "3.2.0",
   "packages": [
@@ -21,6 +23,14 @@
         {
           "type": "positional",
           "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "PC_SESSION_ID",
+          "description": "Session name for evidence and loop views when several host sessions share one repo. Leave unset to use the default session.",
+          "format": "string",
+          "isRequired": false
         }
       ]
     }

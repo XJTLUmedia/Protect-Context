@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "protect-context": {
+      "command": "uvx",
+      "args": ["protect-context", "mcp"]
+    }
+  }
+}

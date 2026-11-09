@@ -2,9 +2,19 @@
 (SPEC §4). Same on-disk store as the pi extension and the CLI
 (.agent-guard/ in the server's working directory).
 
-Run: python -m protect_context.mcp_server   (stdio transport)
+Installed entry point (stdio): `uvx protect-context mcp`, or
+`protect-context mcp` after `pip install protect-context`. That console script
+is `protect_context.cli:main`; the `mcp` verb calls this module.
 
-Hosts configure it via a standard .mcp.json, e.g.:
+From a checkout: `python -m protect_context.mcp_server`.
+
+Hosts configure it via a standard .mcp.json. Published package:
+
+    {"mcpServers": {"protect-context": {
+        "command": "uvx",
+        "args": ["protect-context", "mcp"]}}}
+
+Checkout interpreter:
 
     {"mcpServers": {"protect-context": {
         "command": "/abs/path/.venv/bin/python",

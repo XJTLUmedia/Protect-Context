@@ -1,0 +1,41 @@
+# Publish server.json to the official MCP Registry.
+# Authentication is GitHub OIDC. This file adds no secrets and does not publish
+# the npm or PyPI packages — those versions stay at the already-published 3.2.0.
+# Docs: https://modelcontextprotocol.io/registry/github-actions
+#
+# A GitHub Release that also creates a new v* tag starts this workflow twice.
+# The second publish of the same server.json version can be rejected.
+
+name: Publish to MCP Registry
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-mcp-registry-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC authentication
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish

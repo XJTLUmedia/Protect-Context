@@ -9,14 +9,21 @@ visible *before* they cost you a session.
 <!-- mcp-name: io.github.XJTLUmedia/protect-context -->
 
 <p align="center">
-  <a href="./LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
-  <a href="https://pi.dev/packages"><img alt="pi-package" src="https://img.shields.io/badge/pi--package-gallery-8a2be2"></a>
-  <a href="pyproject.toml"><img alt="python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue"></a>
+  <a href="https://pypi.org/project/protect-context/"><img alt="PyPI" src="https://img.shields.io/pypi/v/protect-context"></a>
+  <a href="https://pepy.tech/project/protect-context"><img alt="PyPI downloads" src="https://img.shields.io/pepy/dt/protect-context"></a>
+  <a href="https://www.npmjs.com/package/protect-context"><img alt="npm" src="https://img.shields.io/npm/v/protect-context"></a>
+  <a href="https://www.npmjs.com/package/protect-context"><img alt="npm downloads" src="https://img.shields.io/npm/dt/protect-context"></a>
+  <a href="https://github.com/XJTLUmedia/Protect-Context/blob/feat/complete-v1-spec/LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <a href="https://pi.dev/packages/protect-context"><img alt="pi-package" src="https://img.shields.io/badge/pi--package-gallery-8a2be2"></a>
+  <a href="https://registry.modelcontextprotocol.io/"><img alt="MCP Registry" src="https://img.shields.io/badge/MCP%20Registry-io.github.XJTLUmedia%2Fprotect-context-blue"></a>
+  <img alt="python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="enforcement: advisory-first" src="https://img.shields.io/badge/enforcement-advisory--first-lightgrey">
   <img alt="runtime dependencies: zero" src="https://img.shields.io/badge/npm%20runtime%20deps-0-success">
 </p>
 
 ![protect-context injects a session brief — contract, decisions, corrections, loops, last evidence — before the agent starts working](./preview.png)
+
+<!-- demo-gif-placeholder: replace this comment with a real 15–25s demo GIF (status, unevidenced done, verify, loop brake, widget). Do not link or commit a stand-in image. -->
 
 One project-local `.agent-guard/` store · three interfaces backed by the same
 logic:
@@ -40,6 +47,8 @@ change is correct. [`SPEC.md`](./SPEC.md) is the frozen v1.0 contract.
 - [Quick start](#quick-start)
   - [Install the pi extension](#install-the-pi-extension)
   - [Install the MCP server](#install-the-mcp-server)
+    - [Cursor / Claude Code / any stdio host](#cursor--claude-code--any-stdio-host-recommended)
+    - [From a checkout](#from-a-checkout)
   - [Install the Python CLI](#install-the-python-cli)
   - [From source](#from-source)
 - [A 30-second tour](#a-30-second-tour)
@@ -158,7 +167,55 @@ session start.
 
 ### Install the MCP server
 
-For pi with `pi-mcp-adapter`, add `.mcp.json` at the project root:
+The MCP server is the PyPI package. With uv installed, `uvx protect-context mcp`
+serves it on stdio. After `pip install protect-context`, the same entry point
+is `protect-context mcp`. Both run the `protect-context` console script
+(`protect_context.cli:main`); the `mcp` verb starts `protect_context.mcp_server`.
+
+#### Cursor / Claude Code / any stdio host (recommended)
+
+**Cursor** — project `.cursor/mcp.json` or global MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "protect-context": {
+      "command": "uvx",
+      "args": ["protect-context", "mcp"]
+    }
+  }
+}
+```
+
+**Claude Code** — CLI:
+
+```bash
+claude mcp add protect-context -- uvx protect-context mcp
+```
+
+Or hand-edit Claude Desktop / Claude Code MCP config with the same `command` /
+`args` shape.
+
+**Generic `.mcp.json`** (pi-mcp-adapter and other hosts). This repository
+checks in the same file at the root:
+
+```json
+{
+  "mcpServers": {
+    "protect-context": {
+      "command": "uvx",
+      "args": ["protect-context", "mcp"]
+    }
+  }
+}
+```
+
+Set `"env": { "PC_SESSION_ID": "my-session" }` when several host sessions share
+one repo and need separate evidence and loop views.
+
+#### From a checkout
+
+An editable install uses that environment's interpreter:
 
 ```json
 {
@@ -171,21 +228,7 @@ For pi with `pi-mcp-adapter`, add `.mcp.json` at the project root:
 }
 ```
 
-The same stdio shape works in any generic MCP host. No checkout is needed
-either: `uvx protect-context mcp` runs the same server straight from PyPI. Set
-`PC_SESSION_ID` when several host sessions need distinct evidence and loop views:
-
-```json
-{
-  "mcpServers": {
-    "protect-context": {
-      "command": "/absolute/path/to/protect-context/.venv/bin/python",
-      "args": ["-m", "protect_context.mcp_server"],
-      "env": { "PC_SESSION_ID": "my-session" }
-    }
-  }
-}
-```
+`PC_SESSION_ID` uses the same `env` object as the stdio examples above.
 
 The MCP surface exposes the nine frozen v1.0 tools plus later read surfaces
 (`guard_journal`, `guard_orientation`, and `guard_recall`). Tools carry
@@ -757,7 +800,7 @@ instead of leaving stale numbers in this README.
 | No guard block after an automatic compaction | Host emits no `context` event, so mid-run re-assertion cannot run | It returns at the next user prompt; check the host supports the `context` hook |
 | `task:` line is wrong or missing | Auto-capture ignores short prompts and slash commands, and an owner task always wins | Set it explicitly with `/guard-task <text>` or `/guard-task --clear` |
 | `PC_SESSION_ID` changes nothing in evidence | It scopes ledger *views*, not `state.json` | Expected: state is project-global by design |
-| MCP tool missing in host | Server not started with the venv interpreter | Point `command` at `.venv/bin/python` and pass `-m protect_context.mcp_server` |
+| MCP tool missing in host | Host is not launching the PyPI server, or a checkout server is not using its venv interpreter | Use `command` `uvx` and `args` `["protect-context", "mcp"]`. From a checkout, point `command` at `.venv/bin/python` and pass `-m protect_context.mcp_server` |
 | Extension does not load | Node older than 22.19 or pi not restarted | Check `pi list`, then restart; use `pi -ne` to start without extensions |
 | Contract edit rejected over MCP | Removing a frozen seed constraint | Seeds are protected; use the CLI or a pi slash command as the owner |
 | Published, but `pi.dev/packages` says "No packages match" | The gallery index is built from npm search, and npm drops search documents whose `downloads.monthly` is `0`. A publish rewrites that document with the download figure of that moment, so publishing before npm's first download rollup pins it at `0` | Run `scripts/check-discoverability.sh`; if the document's downloads are `0` while the downloads API reports traffic, publish once the rollup exists (npm re-crawls documents on its own as well, typically within a week) |
