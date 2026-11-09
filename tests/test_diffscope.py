@@ -282,3 +282,14 @@ def test_untracked_backslash_paths_are_counted_on_posix(tmp_path):
     scan = diffscope._scan_untracked(root.resolve(), [r"sub\file.txt"], 800)
     assert scan["lines"] == 2
     assert scan["skipped_files"] == 0
+
+
+def test_partial_cfg_falls_back_to_builtin_defaults():
+    """diff_audit accepts a partial cfg (public signature) without KeyError."""
+    from protect_context.defaults import DEFAULT_CONFIG
+
+    st = diffscope.diff_audit(cfg={"diff_warn_lines": 1})
+    assert "error" in st or st["hard_lines"] == DEFAULT_CONFIG["diff_hard_lines"]
+    if "error" not in st:
+        assert st["warn_lines"] == 1
+        assert st["warn_files"] == DEFAULT_CONFIG["diff_warn_files"]

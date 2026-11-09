@@ -7,6 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import protectContext from "../index.ts";
 import { loadState } from "../lib/store.ts";
+import { TASK_DISPLAY_MAX } from "../lib/brief.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
 
@@ -143,7 +144,7 @@ test("compaction recovery: mid-run re-assertion, journal read path, task anchor"
     // --- the task anchor stores exactly what the brief can show ----------
     await pi.commands.get("guard-task").handler(`long ${"w".repeat(400)}`, ctx);
     const stored = loadState(dir)!.task!;
-    assert.equal(Array.from(stored.text).length, 200, "store and display share one cap");
+    assert.equal(Array.from(stored.text).length, TASK_DISPLAY_MAX, "store and display share one cap");
     assert.ok(stored.text.endsWith("…"));
     assert.equal(stored.source, "owner");
 

@@ -99,9 +99,23 @@ def guard_verify(command: str, timeout_s: int = 180) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-def guard_evidence(limit: int = 5) -> str:
-    """Recent verification runs from the evidence ledger."""
-    return verify.render_recent(verify.recent(limit), verify.count())
+def guard_evidence(limit: int = 5, evidence_id: str | None = None) -> str:
+    """Recent verification runs, or one run in full by evidence id.
+
+    Passing an id returns the complete record (digest tail, why, fix) so a
+    past failure can be read back instead of only counted.
+    """
+    if evidence_id:
+        entry = verify.find(evidence_id)
+        if entry is None:
+            missing = store.display_text(evidence_id, 40)
+            return (
+                f"evidence: no recorded run with id {missing}\n"
+                "Nudge: call guard_evidence without an id to list the recent window."
+            )
+        return verify.render_entry(entry)
+    runs, total = verify.recent_with_total(limit)
+    return verify.render_recent(runs, total)
 
 
 @mcp.tool(annotations=_LOCAL_MUTATION)
@@ -149,8 +163,14 @@ def guard_contract(action: str, text: str | None = None, id: str | None = None) 
 
 
 @mcp.tool(annotations=_LOCAL_APPEND)
-def guard_note(type: str, text: str, tags: list[str] = []) -> str:
-    """Journal an agent-authored entry with a durable ``agent`` provenance tag."""
+def guard_note(type: str, text: str, tags: list[str] | None = None) -> str:
+    """Journal an agent-authored entry with a durable ``agent`` provenance tag.
+
+    Tag it ``lesson`` to make it a precedent: lessons are re-injected into the
+    session brief every turn instead of rotating out with the recent caps. Tag a
+    correction ``satisfied`` or ``dissatisfied`` to record how the owner reacted,
+    so the next similar situation starts from that outcome.
+    """
     try:
         entry = journal.add(type, text, journal.tags_with_required(tags, "agent"))
     except ValueError as e:
@@ -165,8 +185,8 @@ def guard_journal(limit: int = journal.READ_LIMIT_DEFAULT, type: str | None = No
     limit is clamped to a compact, finite range at the journal boundary.
     """
     try:
-        entries = journal.recent(limit, type)
-        return journal.render_recent(entries, journal.count(type), type)
+        entries, total = journal.recent_with_total(limit, type)
+        return journal.render_recent(entries, total, type)
     except ValueError as e:
         return f"journal: {e}\nNudge: pass a valid type or omit the type filter."
 

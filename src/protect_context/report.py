@@ -51,15 +51,16 @@ def status() -> tuple[str, int]:
     else:
         lines.append("loops: none")
 
-    runs = verify.recent(1, session=sid)
+    runs, evidence_total = verify.recent_with_total(1, session=sid)
+    last_label = verify.outcome_label(runs[0]) if runs else None
     if runs:
         r = runs[0]
         lines.append(
-            f"evidence {verify.count(session=sid)} · "
-            f"last {store.display_text(r['id'], 40)} exit {r['exit']} {verify.outcome_label(r)}"
+            f"evidence {evidence_total} · "
+            f"last {store.display_text(r['id'], 40)} exit {r['exit']} {last_label}"
         )
     else:
-        lines.append(f"evidence {verify.count(session=sid)} · last none")
+        lines.append(f"evidence {evidence_total} · last none")
 
     lines.append(f"contract {len(contract.load())} constraints")
     # Goal #4: conventions files are the first thing to read in an unfamiliar
@@ -80,7 +81,7 @@ def status() -> tuple[str, int]:
         )
     elif warn:
         nudge = f"Nudge: diff ≥ {cfg['diff_warn_lines']} lines — split it before it grows."
-    elif runs and verify.outcome_label(runs[0]) == "UNTRUSTED":
+    elif last_label == "UNTRUSTED":
         nudge = (
             "Nudge: the latest verify exited 0 but is not trustworthy — "
             "re-run without a pipe or failure mask before citing it."

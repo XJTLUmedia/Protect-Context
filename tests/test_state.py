@@ -74,3 +74,26 @@ def test_save_prunes_old_sessions_but_keeps_the_current_one():
     assert "s-0" in saved["sessions"], "the current session is never pruned"
     assert "s-11" in saved["sessions"], "newest sessions are retained"
     assert "s-1" not in saved["sessions"], "the oldest non-current session is dropped"
+
+
+def test_corrupt_session_entry_is_dropped_so_save_cannot_crash():
+    """A hand-edited/non-dict session entry is corrupt data: reads stay safe and
+    save_state (which prunes by reading timestamps) must not raise."""
+    store.ensure()
+    (store.guard_dir() / "state.json").write_text(
+        json.dumps(
+            {
+                "current_session": {"id": "test-session", "started": None, "git_head": None},
+                "sessions": {"test-session": {"started": None, "git_head": None}, "ghost": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    st = store.load_state()
+    assert "ghost" not in st["sessions"]
+
+    store.save_state(st)  # would raise AttributeError before the fix
+    saved = json.loads((store.guard_dir() / "state.json").read_text(encoding="utf-8"))
+    assert "ghost" not in saved["sessions"]
+    assert "test-session" in saved["sessions"]

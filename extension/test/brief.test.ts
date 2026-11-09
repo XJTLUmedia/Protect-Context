@@ -9,6 +9,7 @@ import {
   BRIEF_MAX_DECISIONS,
   BRIEF_MAX_LOOPS,
   BRIEF_MAX_RECALL,
+  TASK_DISPLAY_MAX,
 } from "../lib/brief.ts";
 import { DEFAULT_CONTRACT } from "../lib/defaults.ts";
 
@@ -53,7 +54,7 @@ test("brief: free-text lines are capped (model text cannot bloat the brief)", ()
     contract: DEFAULT_CONTRACT.constraints,
     corrections: [{ type: "correction", text: long, tags: [] }],
     loops: [{ cmd: long, failures: 2, lastExit: 1 }],
-    lastEvidence: { id: "ev-0001", exit: 1, cmd: long, ms: 10 },
+    lastEvidence: { id: "ev-0001", exit: 1, cmd: long, ms: 10, label: "FAIL" },
   });
   for (const line of brief.split("\n")) {
     // dynamic text ≤ 200 chars; fixed prefixes (e.g. "last verify: ev-0001 exit=1 '") add ≤ ~40
@@ -85,7 +86,7 @@ test("brief: includes at most 3 corrections and 2 loops and last evidence", () =
     contract: DEFAULT_CONTRACT.constraints,
     corrections,
     loops,
-    lastEvidence: { id: "ev-0007", exit: 0, cmd: "npm test", ms: 1200 },
+    lastEvidence: { id: "ev-0007", exit: 0, cmd: "npm test", ms: 1200, label: "ok" },
   });
   const lines = brief.split("\n");
   const corrLines = lines.filter((l) => l.startsWith("- correction "));
@@ -188,7 +189,7 @@ test("brief: owner task anchors the top of the brief and is bounded", () => {
     lastEvidence: null,
   });
   const taskLine = long.split("\n")[0]!;
-  assert.equal(Array.from(taskLine).length, "task: ".length + 200);
+  assert.equal(Array.from(taskLine).length, "task: ".length + TASK_DISPLAY_MAX);
   assert.ok(taskLine.endsWith("…"), "an overlong task is marked, not silently cut");
   const none = buildBrief({ task: "", contract: DEFAULT_CONTRACT.constraints, corrections: [], loops: [], lastEvidence: null });
   assert.doesNotMatch(none, /^task:/m);
@@ -299,4 +300,144 @@ test("brief: task tag matches inject at most two trusted rows the caps hid", () 
     selectTaskRecall("the and for", [{ type: "note", text: "stopwords only", tags: ["the"] }], new Set()),
     [],
   );
+});
+
+test("brief: the evidence line carries the trust label", () => {
+  const base = { contract: DEFAULT_CONTRACT.constraints, corrections: [], loops: [] as never[] };
+  const clean = buildBrief({
+    ...base,
+    lastEvidence: { id: "ev-0059", exit: 0, cmd: "pytest -q", ms: 12000, label: "ok" },
+  });
+  const masked = buildBrief({
+    ...base,
+    lastEvidence: { id: "ev-0058", exit: 0, cmd: "pytest -q | tail -3", ms: 12000, label: "UNTRUSTED" },
+  });
+  const failed = buildBrief({
+    ...base,
+    lastEvidence: { id: "ev-0007", exit: 1, cmd: "pytest -q", ms: 900, label: "FAIL" },
+  });
+  // A masked exit 0 must never render like a clean run.
+  assert.notEqual(clean, masked);
+  assert.ok(clean.includes("exit=0 ok '"));
+  assert.ok(masked.includes("exit=0 UNTRUSTED '"));
+  assert.ok(failed.includes("exit=1 FAIL '"));
+});
+
+test("brief: unverified corrections get their own slot ahead of notes", () => {
+  const brief = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    unverifiedCorrections: [
+      { type: "correction", text: "stop folding dep bumps into releases", tags: ["agent"] },
+    ],
+    agentNotes: [
+      { type: "note", text: "note one", tags: ["agent"] },
+      { type: "note", text: "note two", tags: ["agent"] },
+      { type: "note", text: "note three", tags: ["agent"] },
+    ],
+    loops: [],
+    lastEvidence: null,
+  });
+  const lines = brief.split("\n");
+  assert.ok(lines.includes("corrections (unverified):"), "corrections have their own heading");
+  assert.ok(brief.includes("stop folding dep bumps into releases"));
+  // Ordering: the correction appears before the ordinary notes.
+  assert.ok(brief.indexOf("corrections (unverified):") < brief.indexOf("agent notes (unverified):"));
+});
+
+test("brief: a 300-char task keeps its tail (multi-part asks)", () => {
+  const task = `${"context ".repeat(30)}and fix the tail`;
+  const brief = buildBrief({ task, contract: DEFAULT_CONTRACT.constraints, corrections: [], loops: [], lastEvidence: null });
+  const line = brief.split("\n")[0] ?? "";
+  assert.ok(line.includes("fix the tail"), "the end of the request survives");
+});
+
+test("brief: durable precedents head the journal sections and stay capped", () => {
+  const text = buildBrief({
+    task: "continue",
+    contract: [],
+    precedents: [
+      { type: "decision", text: "when a review lists follow-ups, take all of them", tags: ["lesson"] },
+      { type: "correction", text: "prefer the broad fix over the narrow patch", tags: ["lesson"] },
+      { type: "note", text: "third lesson still fits", tags: ["lesson"] },
+      { type: "note", text: "fourth lesson that must not fit", tags: ["lesson"] },
+    ],
+    decisions: [{ type: "decision", text: "a recent decision", tags: [] }],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  const lines = text.split("\n");
+  assert.ok(lines.includes("precedents:"), text);
+  const precedentAt = lines.indexOf("precedents:");
+  assert.ok(precedentAt < lines.indexOf("decisions:"), "precedents outrank recent chatter");
+  assert.match(text, /take all of them/);
+  assert.match(text, /broad fix/);
+  assert.match(text, /third lesson still fits/);
+  assert.doesNotMatch(text, /fourth lesson/, "only BRIEF_MAX_PRECEDENTS are shown");
+});
+
+test("brief: a precedent already shown is not repeated by task recall", () => {
+  const lesson = { type: "decision", text: "own three follow-ups fully", tags: ["lesson", "follow-ups"] };
+  const text = buildBrief({
+    task: "owner follow-ups",
+    contract: [],
+    precedents: [lesson],
+    decisions: [],
+    corrections: [],
+    recallPool: [lesson],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.equal(text.split("own three follow-ups fully").length - 1, 1);
+});
+
+test("brief: precedents are ranked by task relevance before the cap", () => {
+  const text = buildBrief({
+    task: "the owner got annoyed about retries",
+    contract: [],
+    precedents: [
+      { type: "note", text: "unrelated style note", tags: ["lesson"] },
+      { type: "decision", text: "owner dislikes retries after two failures", tags: ["lesson"] },
+      { type: "note", text: "another unrelated note", tags: ["lesson"] },
+      { type: "note", text: "third unrelated note", tags: ["lesson"] },
+    ],
+    decisions: [],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  const lines = text.split("\n");
+  const at = lines.indexOf("precedents:");
+  assert.match(lines[at + 1] ?? "", /dislikes retries/, "the relevant lesson is shown first");
+});
+
+test("brief: the precedent cap is configurable and can be zero", () => {
+  const precedents = [
+    { type: "note", text: "first lesson", tags: ["lesson"] },
+    { type: "note", text: "second lesson", tags: ["lesson"] },
+  ];
+  const one = buildBrief({
+    task: "",
+    contract: [],
+    precedents,
+    precedentsCap: 1,
+    decisions: [],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.match(one, /first lesson/);
+  assert.doesNotMatch(one, /second lesson/);
+  const off = buildBrief({
+    task: "",
+    contract: [],
+    precedents,
+    precedentsCap: 0,
+    decisions: [],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.doesNotMatch(off, /precedents:/);
 });

@@ -76,3 +76,35 @@ def test_status_discloses_limited_untracked_scan_as_lower_bound(monkeypatch):
     assert "untracked line count is a lower bound" in text
     assert "2 skipped, 1 truncated" in text
     assert level == 0
+
+
+def test_status_does_not_re_read_the_evidence_ledger_for_its_count(monkeypatch):
+    verify.run_verify("true")
+    calls = []
+    original = store.read_jsonl
+
+    def counting(path):
+        calls.append(path)
+        return original(path)
+
+    def no_second_parse(*args, **kwargs):
+        raise AssertionError("status must not count via a second ledger parse")
+
+    monkeypatch.setattr(store, "read_jsonl", counting)
+    monkeypatch.setattr(verify, "count", no_second_parse)
+
+    report.status()
+
+    # loops.streaks still owns one full read of the evidence ledger (it merges
+    # events with verify outcomes); the evidence line shares a single read of
+    # its own instead of parsing twice for slice + count.
+    assert sum(1 for p in calls if p.name.startswith("verify_runs")) <= 2
+
+
+def test_status_nudges_on_an_untrusted_last_verify():
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], check=True, capture_output=True)
+    verify.run_verify("true || true")
+    text, _level = report.status()
+    assert "not trustworthy" in text, "a masked exit 0 must drive the nudge"

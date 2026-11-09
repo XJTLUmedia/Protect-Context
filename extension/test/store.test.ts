@@ -458,5 +458,6 @@ test("verify: compact line format", () => {
 test("defaults: frozen sizes (pinned shape shared with Python)", () => {
   assert.equal(DEFAULT_CONTRACT.constraints.length, 12);
   assert.equal(DEFAULT_CONTRACT.version, 1);
-  assert.equal(Object.keys(DEFAULT_CONFIG).length, 8);
+  // 9 since brief_max_precedents joined the frozen config shape (both runtimes).
+  assert.equal(Object.keys(DEFAULT_CONFIG).length, 9);
 });

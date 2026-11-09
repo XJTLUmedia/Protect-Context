@@ -24,12 +24,29 @@ export interface BriefInput {
   /** Most recent model-written entries, newest first. Shown as explicitly
    *  unverified: they are the agent's own notes, never owner authority. */
   agentNotes?: Array<{ type: string; text: string; tags: string[] }>;
+  /** Model-written corrections, newest first: never authority, but they are
+   *  the record of what the owner corrected, so they get their own slot
+   *  instead of competing with ordinary notes for two lines. */
+  unverifiedCorrections?: Array<{ type: string; text: string; tags: string[] }>;
+  /** Journal entries tagged `lesson`, newest first: durable precedents that
+   *  are re-shown every turn instead of rotating out with the recent caps.
+   *  Ordered by task relevance before the cap is applied. */
+  precedents?: Array<{ type: string; text: string; tags: string[] }>;
+  /** Precedent cap for this call (config `brief_max_precedents`). */
+  precedentsCap?: number;
   /** Trusted decision/correction/note rows, newest first. At most
    *  BRIEF_MAX_RECALL are injected when a tag matches the owner task and the
    *  entry is not already visible in the capped sections. */
   recallPool?: Array<{ type: string; text: string; tags: string[] }>;
   loops: LoopInfo[];
-  lastEvidence: { id: string; exit: number; cmd: string; ms: number | null } | null;
+  /** `label` is required: a masked exit 0 must never render like a clean one. */
+  lastEvidence: {
+    id: string;
+    exit: number;
+    cmd: string;
+    ms: number | null;
+    label: "ok" | "FAIL" | "UNTRUSTED";
+  } | null;
 }
 
 export const BRIEF_MAX_CONTRACT_LINES = 12;
@@ -39,8 +56,21 @@ export const BRIEF_MAX_AGENT_NOTES = 2;
 export const BRIEF_MAX_LOOPS = 2;
 /** Trusted tag matches injected when the owner task names a journal tag the caps hid. */
 export const BRIEF_MAX_RECALL = 2;
-/** Owner task display cap (chars). */
-export const TASK_DISPLAY_MAX = 200;
+/** Owner task display cap (chars). 400 so a multi-part request keeps its tail;
+ *  the brief is digest-gated, so the extra bytes are paid only on change. */
+export const TASK_DISPLAY_MAX = 400;
+/** Unverified corrections shown per brief (separate from ordinary notes). */
+export const BRIEF_MAX_UNVERIFIED_CORRECTIONS = 2;
+/** Durable precedents (`lesson` tag) shown per brief, ahead of recent chatter.
+ *  Three, not two: a rotation of two made the most-cited lesson the one that
+ *  fell off. The brief is digest-gated, so the extra line is paid on change. */
+export const BRIEF_MAX_PRECEDENTS = 3;
+
+/** Config-supplied precedent cap, clamped to the same 0–10 range as config.json. */
+function clampPrecedentsCap(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return BRIEF_MAX_PRECEDENTS;
+  return Math.max(0, Math.min(Math.trunc(value), 10));
+}
 /** Agent-note display cap (chars) — shorter than a trusted entry on purpose. */
 export const AGENT_NOTE_DISPLAY_MAX = 120;
 /** Command display cap (chars) — matches Python's cmd[:60] discipline. */
@@ -94,12 +124,20 @@ interface SectionInfo {
  *  so the brief can point at the read path instead of silently truncating. */
 function appendJournalSection(
   lines: string[],
-  heading: "decisions:" | "corrections:" | "agent notes (unverified):",
+  heading:
+    | "precedents:"
+    | "decisions:"
+    | "corrections:"
+    | "corrections (unverified):"
+    | "agent notes (unverified):",
   entries: Array<{ text: string; tags: string[] }>,
   cap: number,
   textMax = 200,
 ): SectionInfo {
   if (entries.length === 0) return { hidden: 0, truncated: false };
+  // A cap of 0 disables the section: print no heading, but still account for
+  // what was omitted so the "+N more" line stays honest.
+  if (cap <= 0) return { hidden: entries.length, truncated: false };
   lines.push(heading);
   let truncated = false;
   for (const entry of entries.slice(0, cap)) {
@@ -131,6 +169,30 @@ export function taskRecallKeywords(task: string): string[] {
     if (found.length >= 12) break;
   }
   return found;
+}
+
+/**
+ * Order precedents by how much of the owner task they answer, then by recency.
+ *
+ * Recency alone made the most-cited lesson the first to fall off the cap. The
+ * comparison is stable, so equal-scoring entries keep their newest-first order.
+ */
+function rankPrecedents(
+  task: string,
+  entries: Array<{ type: string; text: string; tags: string[] }>,
+): Array<{ type: string; text: string; tags: string[] }> {
+  const keywords = taskRecallKeywords(task);
+  if (keywords.length === 0 || entries.length < 2) return entries;
+  const scored = entries.map((entry, index) => {
+    const haystack = [normalizeOneLine(entry.text, 10_000), ...(Array.isArray(entry.tags) ? entry.tags : [])]
+      .join(" ")
+      .toLowerCase();
+    let score = 0;
+    for (const keyword of keywords) if (haystack.includes(keyword)) score += 1;
+    return { entry, score, index };
+  });
+  scored.sort((a, b) => b.score - a.score || a.index - b.index);
+  return scored.map((item) => item.entry);
 }
 
 /** Newest trusted rows whose tags match the owner task and that are not already shown. */
@@ -167,11 +229,17 @@ export function selectTaskRecall(
 }
 
 function visibleJournalText(
+  precedents: Array<{ text: string }>,
   decisions: Array<{ text: string }>,
   corrections: Array<{ text: string }>,
 ): Set<string> {
   const visible = new Set<string>();
-  for (const entry of [...decisions.slice(0, BRIEF_MAX_DECISIONS), ...corrections.slice(0, BRIEF_MAX_CORRECTIONS)]) {
+  const shown = [
+    ...precedents,
+    ...decisions.slice(0, BRIEF_MAX_DECISIONS),
+    ...corrections.slice(0, BRIEF_MAX_CORRECTIONS),
+  ];
+  for (const entry of shown) {
     const full = normalizeOneLine(entry.text, 10_000);
     if (full !== "") visible.add(full);
   }
@@ -179,8 +247,9 @@ function visibleJournalText(
 }
 
 /** Build the compact brief: owner task, contract (≤12 lines), ≤3 trusted
- *  decisions, ≤3 trusted corrections, ≤2 unverified agent notes, ≤2 loops, and
- *  last evidence. Anything a cap dropped is announced with the read path.
+ *  decisions, ≤3 trusted corrections, ≤2 unverified corrections, ≤2 unverified
+ *  agent notes, ≤2 loops, and last evidence with its trust label. Anything a
+ *  cap dropped is announced with the read path.
  *  At most two extra trusted rows are injected when the task names their tag. */
 export function buildBrief(input: BriefInput): string {
   const lines: string[] = [];
@@ -207,8 +276,26 @@ export function buildBrief(input: BriefInput): string {
   }
 
   const sections = [
+    // Durable precedents go first: a lesson the owner already paid for must not
+    // rotate out of the brief just because newer session chatter exists. Ranked
+    // by task relevance, so the cap keeps the lesson this turn needs.
+    appendJournalSection(
+      lines,
+      "precedents:",
+      rankPrecedents(input.task ?? "", input.precedents ?? []),
+      clampPrecedentsCap(input.precedentsCap),
+    ),
     appendJournalSection(lines, "decisions:", input.decisions ?? [], BRIEF_MAX_DECISIONS),
     appendJournalSection(lines, "corrections:", input.corrections, BRIEF_MAX_CORRECTIONS),
+    // Known corrections outrank ordinary notes: they are what the owner said to
+    // stop doing, so starving them behind newer notes loses the lesson.
+    appendJournalSection(
+      lines,
+      "corrections (unverified):",
+      input.unverifiedCorrections ?? [],
+      BRIEF_MAX_UNVERIFIED_CORRECTIONS,
+      AGENT_NOTE_DISPLAY_MAX,
+    ),
     appendJournalSection(
       lines,
       "agent notes (unverified):",
@@ -222,7 +309,11 @@ export function buildBrief(input: BriefInput): string {
   const recalled = selectTaskRecall(
     input.task ?? "",
     input.recallPool ?? [],
-    visibleJournalText(input.decisions ?? [], input.corrections),
+    visibleJournalText(
+      rankPrecedents(input.task ?? "", input.precedents ?? []).slice(0, clampPrecedentsCap(input.precedentsCap)),
+      input.decisions ?? [],
+      input.corrections,
+    ),
   );
   if (recalled.length > 0) {
     lines.push("recall:");
@@ -245,9 +336,12 @@ export function buildBrief(input: BriefInput): string {
   }
 
   if (input.lastEvidence) {
-    const ms = input.lastEvidence.ms === null ? "" : ` ${(input.lastEvidence.ms / 1000).toFixed(1)}s`;
+    const ev = input.lastEvidence;
+    const ms = ev.ms === null ? "" : ` ${(ev.ms / 1000).toFixed(1)}s`;
+    // The label is not decoration: without it a masked exit 0 renders exactly
+    // like a clean run, which is the failure this line exists to prevent.
     lines.push(
-      `last verify: ${truncLine(input.lastEvidence.id, 40)} exit=${input.lastEvidence.exit} '${truncLine(input.lastEvidence.cmd, CMD_DISPLAY_MAX)}'${ms}`,
+      `last verify: ${truncLine(ev.id, 40)} exit=${ev.exit} ${ev.label} '${truncLine(ev.cmd, CMD_DISPLAY_MAX)}'${ms}`,
     );
   }
 

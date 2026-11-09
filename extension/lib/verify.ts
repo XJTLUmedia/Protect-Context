@@ -92,6 +92,21 @@ export function failureMasked(command: string): boolean {
   return MASK_TAIL.test(normalizeCommand(shellShape(command).outside));
 }
 
+/** POSIX single-quote escape for the shell rewrite below. */
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/** Exact trusted rewrite for a piped command, or "" when it does not apply.
+ *  POSIX sh has no `pipefail`, so the rewrite runs the same command under bash
+ *  instead of asking the model to hand-edit a pipeline. Mirrors
+ *  verify.pipefail_rewrite() on the Python side. */
+export function pipefailRewrite(command: unknown): string {
+  if (typeof command !== "string" || command.trim() === "" || command.includes("pipefail")) return "";
+  if (!shellShape(command).pipe) return "";
+  return `bash -o pipefail -c ${shellQuote(command)}`;
+}
+
 /** Reasons an exit-0 result must not be cited as proof. Empty when clean. */
 export function trustIssues(command: string): string[] {
   if (command.trim() === "") return [];
@@ -289,9 +304,14 @@ export function renderVerifyReport(run: VerifyRun, cwd?: string): string {
   lines.push(`digest: ${first ? truncLine(first, 160) : "(no output)"}`);
   if (label === "UNTRUSTED") {
     lines.push(`why: ${trustIssues(run.cmd).join(" ")}`);
-    lines.push(
-      "fix: re-run without a failure mask. When every pipeline stage must pass, use `set -o pipefail; ...` (or drop the pipe). Do not cite this id as proof.",
-    );
+    const rewrite = pipefailRewrite(run.cmd);
+    if (rewrite !== "") {
+      lines.push(`fix: re-run exactly this so every pipeline stage counts: ${rewrite} — do not cite this id as proof.`);
+    } else {
+      lines.push(
+        "fix: drop the trailing failure mask and re-run the command as-is. Do not cite this id as proof.",
+      );
+    }
     lines.push("Nudge: this run is recorded, but exit 0 here is not evidence of success.");
     return lines.join("\n");
   }

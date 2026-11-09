@@ -387,3 +387,18 @@ def test_mcp_verb_starts_even_when_proxy_env_is_broken(tmp_path):
     assert rc == 0, stderr
     assert hello["result"]["serverInfo"]["name"] == "protect-context"
     assert "guard_status" in {t["name"] for t in listed["result"]["tools"]}
+
+
+def test_evidence_can_be_read_back_by_id(capsys):
+    run = verify.run_verify("true")
+    assert main(["evidence", "--id", run["id"]]) == 0
+    out = capsys.readouterr().out
+    assert f"PC verify {run['id']}" in out
+    assert "Nudge:" in out
+
+
+def test_evidence_with_unknown_id_fails_actionably(capsys):
+    assert main(["evidence", "--id", "ev-9999"]) == 2
+    out = capsys.readouterr().out
+    assert "no recorded run with id ev-9999" in out
+    assert "without --id" in out

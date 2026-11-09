@@ -5,10 +5,18 @@ segments are concatenated oldest-first — the same window every other reader
 sees (SPEC §2). Segments already dropped by rotation are not searched.
 
 No embeddings, no network, and no extra index. Filters combine with AND.
-Keywords are AND across the query and OR across ``text``, ``cmd``, and
-``digest``; a keyword that is itself an evidence id (``ev-NNNN``) also matches
-that id. Tags are exact, case-insensitive, and AND: every requested tag must
-be present. Evidence rows have no tags, so a tag filter excludes them.
+Keywords rank by how many of them hit, because a query is a paraphrase rather
+than an exact string: common English stopwords are dropped, and a query of
+three or more keywords needs two real matches so one shared word cannot flood
+the list. Each keyword matches across ``text``, ``cmd``, and ``digest``; a
+keyword that is itself an evidence id (``ev-NNNN``) also matches that id. Tags
+are exact, case-insensitive, and AND: every requested tag must be present.
+Evidence rows have no tags, so a tag filter excludes them.
+
+When a query is given, past bash commands from the events ledger join the
+corpus as ``command`` rows (successful calls only, deduplicated by fingerprint
+and skipped when the same command is already in the evidence ledger), so
+"copy this to that folder" reaches the command that did it last time.
 
 Ranking is match strength, then recency. Recency is the stored timestamp
 string (writers use ISO-8601, newest last), with read order as a tiebreak.
@@ -32,6 +40,7 @@ MAX_KEYWORDS = 12
 QUERY_CAP = 500
 
 TEXT_WEIGHT = 3
+TAG_WEIGHT = 2
 CMD_WEIGHT = 2
 DIGEST_WEIGHT = 1
 ID_WEIGHT = 4
@@ -40,6 +49,26 @@ CMD_SUB_WEIGHT = 1
 
 _EV_ID = re.compile(r"ev-(\d+)$", re.IGNORECASE)
 _AGENT_TAG = "agent"
+
+# Query words that carry no signal on their own. Dropped before ranking so a
+# paraphrased question ("did the owner take all three follow-ups?") still
+# reaches the entry that answers it instead of dying on AND("the", "did").
+_STOPWORDS = frozenset(
+    (
+        "a an and any are as at be been before being but by can could did do does"
+        " doing done for from get gets got had has have how i if in into is it"
+        " its just me more"
+        " most my no not now of on once only or other our out over own same she"
+        " should so some such than that the their them then there these they this"
+        " those through to too under until up very was we were what when where"
+        " which while who whom why will with would you your"
+    ).split()
+)
+# A longer query must share more than one word, or every entry that mentions
+# "owner" would match a five-word question.
+_MULTI_MATCH_FROM = 3
+_MULTI_MATCH_FLOOR = 2
+
 
 
 def canonical_evidence_id(value: object) -> str | None:
@@ -56,10 +85,10 @@ def canonical_evidence_id(value: object) -> str | None:
     digits = match.group(1)
     if len(digits) > 8:
         return None
-    number = int(digits)
-    if number < 1:
+    trimmed = digits.lstrip("0")
+    if not trimmed:
         return None
-    return f"ev-{number:04d}"
+    return f"ev-{trimmed.zfill(4)}"
 
 
 def bounded_limit(limit: object) -> int:
@@ -114,7 +143,7 @@ def _keywords(query: object) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     for part in raw.split():
-        if not part or part in seen:
+        if not part or part in seen or part in _STOPWORDS:
             continue
         seen.add(part)
         found.append(part)
@@ -164,7 +193,9 @@ def _requested_tags(tags: object) -> list[str]:
 
 
 def _is_agent(tags: list[str]) -> bool:
-    return any(store.display_text(tag, 40) == _AGENT_TAG for tag in tags)
+    # Same normalisation as the tag filter (_tag_key), so a stored `Agent` tag is
+    # both filterable and labelled unverified instead of trusted.
+    return any(_tag_key(tag) == _AGENT_TAG for tag in tags)
 
 
 def _display_tags(tags: list[str]) -> list[str]:
@@ -233,29 +264,239 @@ def _as_evidence(row: dict) -> dict | None:
     }
 
 
-def _keyword_score(keywords: list[str], row: dict) -> int | None:
+# Tools whose rows are shell runs; every other tool leaves a "reuse key" that
+# points at the file or pattern it touched.
+SHELL_TOOLS = frozenset(("bash", "guard_verify"))
+
+
+def _file_rows(events: list[dict]) -> list[dict]:
+    """Non-shell tool calls grouped by their reuse key, newest first.
+
+    A read/edit/search call records the path or pattern it used, so "where did I
+    read this before" is answerable from the ledger instead of re-derived. These
+    are hints only: they carry no trust and never drive a loop streak.
+    """
+    grouped: dict[str, dict] = {}
+    for row in events:
+        if not isinstance(row, dict) or row.get("kind") != "tool_result":
+            continue
+        tool = row.get("tool")
+        if not isinstance(tool, str) or not tool or tool in SHELL_TOOLS:
+            continue
+        key = row.get("cmd")
+        if not isinstance(key, str) or not key.strip():
+            continue
+        digest = store.fingerprint(key)
+        if not digest:
+            continue
+        seen = grouped.get(digest)
+        if seen is None:
+            grouped[digest] = {
+                "source": "file",
+                "kind": "file",
+                "text": "",
+                "cmd": key,
+                "digest": "",
+                "ts": row.get("ts") if isinstance(row.get("ts"), str) else "",
+                "tags": [],
+                "evidence_id": None,
+                "exit_code": None,
+                "provenance": "agent",
+                "tool": tool,
+                "uses": 1,
+                "last_ok": None,
+                "last_exit": None,
+            }
+            seen = grouped[digest]
+        else:
+            seen["uses"] = _as_count(seen.get("uses")) + 1
+            seen["ts"] = row.get("ts") if isinstance(row.get("ts"), str) else seen["ts"]
+            seen["cmd"] = key
+            seen["tool"] = tool
+        exit_code = row.get("exit")
+        seen["last_ok"] = row.get("ok") if isinstance(row.get("ok"), bool) else None
+        seen["last_exit"] = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+    return list(grouped.values())
+
+
+def _command_rows(events: list[dict]) -> list[dict]:
+    """Successful bash calls grouped by fingerprint, newest first.
+
+    Only ``tool_call`` rows with a command that was not refused (``ok`` not
+    False) are reused: a blocked or declined attempt is not a proven recipe.
+    """
+    grouped: dict[str, dict] = {}
+    # session -> recently issued, still unpaired calls as (tool, fingerprint).
+    pending: dict[str, list[tuple[str, str]]] = {}
+    for row in events:
+        if not isinstance(row, dict):
+            continue
+        session = row.get("session")
+        session_key = session if isinstance(session, str) else ""
+        if row.get("kind") == "tool_result":
+            stack = pending.get(session_key)
+            if not stack:
+                continue
+            tool = row.get("tool")
+            tool = tool if isinstance(tool, str) else ""
+            result_cmd = row.get("cmd")
+            result_key = store.fingerprint(result_cmd) if isinstance(result_cmd, str) and result_cmd.strip() else ""
+            match: int | None = None
+            if result_key:
+                for index in range(len(stack) - 1, -1, -1):
+                    if stack[index][1] == result_key:
+                        match = index
+                        break
+            if match is None:
+                # No command to correlate with: attach only when the tool
+                # identifies exactly one outstanding call. With two overlapping
+                # bash calls the pairing would be a guess, and a mislabelled
+                # outcome is worse than no outcome.
+                candidates = [i for i, (call_tool, _) in enumerate(stack) if not tool or call_tool == tool]
+                if len(candidates) == 1:
+                    match = candidates[0]
+            if match is None:
+                continue
+            key = stack.pop(match)[1]
+            if key in grouped:
+                exit_code = row.get("exit")
+                grouped[key]["last_ok"] = row.get("ok") if isinstance(row.get("ok"), bool) else None
+                grouped[key]["last_exit"] = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+            continue
+        if row.get("kind") != "tool_call" or row.get("ok") is False:
+            continue
+        cmd = row.get("cmd")
+        if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        key = store.fingerprint(cmd)
+        if not key:
+            continue
+        call_tool = row.get("tool")
+        stack = pending.setdefault(session_key, [])
+        stack.append((call_tool if isinstance(call_tool, str) else "", key))
+        del stack[:-4]  # bounded: only the newest few calls can still be pending
+        ts = row.get("ts")
+        seen = grouped.get(key)
+        if seen is None:
+            grouped[key] = {
+                "source": "command",
+                "kind": "command",
+                "text": "",
+                "cmd": cmd,
+                "digest": "",
+                "ts": ts if isinstance(ts, str) else "",
+                "tags": [],
+                "evidence_id": None,
+                "exit_code": None,
+                "provenance": "agent",
+                "uses": 1,
+                "last_ok": None,
+                "last_exit": None,
+            }
+            continue
+        seen["uses"] += 1
+        if isinstance(ts, str) and ts > seen["ts"]:
+            seen["ts"] = ts
+            seen["cmd"] = cmd
+    return list(grouped.values())
+
+
+def _canonical_keys(keywords: list[str]) -> list[str | None]:
+    """Canonical ev-NNNN form of each keyword, computed once per query."""
+    return [canonical_evidence_id(keyword) for keyword in keywords]
+
+
+def word_hit(haystack: str, keyword: str) -> bool:
+    """True when ``keyword`` starts a word in ``haystack``.
+
+    A plain substring test made "old" hit the tag "threshold" and "arch" hit
+    "search", so a query could answer itself with the wrong entry. Matching only
+    at a word start keeps the useful morphology ("patch" -> "patches") while
+    dropping the mid-word noise.
+    """
+    if not keyword:
+        return False
+    haystack = haystack.casefold()
+    start = 0
+    while True:
+        idx = haystack.find(keyword, start)
+        if idx < 0:
+            return False
+        if idx == 0 or not haystack[idx - 1].isalnum():
+            return True
+        start = idx + 1
+
+
+def _raw_hit(keyword: str, canonical: str | None, row: dict) -> int:
+    """Unweighted hit strength for one keyword against one row."""
+    hit = 0
+    if word_hit(row["text"], keyword):
+        hit += TEXT_WEIGHT
+    if any(word_hit(tag, keyword) for tag in row["tags"]):
+        hit += TAG_WEIGHT
+    if word_hit(row["cmd"], keyword):
+        hit += CMD_WEIGHT
+    if word_hit(row["digest"], keyword):
+        hit += DIGEST_WEIGHT
+    if canonical is not None and canonical == row["evidence_id"]:
+        hit += ID_WEIGHT
+    return hit
+
+
+def _idf(df: int, total: int) -> int:
+    """Rarity multiplier in thousandths, clamped to [1x, 8x].
+
+    A word in every row ("owner") is worth no more than its base weight; a word
+    in one row of a hundred is worth up to 8x. Integer math only, so the
+    TypeScript mirror computes bit-identical values.
+    """
+    if df <= 0:
+        return 1000
+    scaled = (total * 1000) // df
+    return max(1000, min(scaled, 8000))
+
+
+def _keyword_score(
+    keywords: list[str], canon_ids: list[str | None], row: dict, idf: list[int]
+) -> int | None:
+    """Rarity-weighted partial-match score, or None when the row is too weak.
+
+    Every hit adds weight (idf-adjusted) instead of casting an all-or-nothing
+    vote, so a paraphrase still finds the entry that answers most of it. The
+    floor keeps precision: a three-or-more-word query must share at least two
+    words.
+    """
     if not keywords:
         return 0
-    text = row["text"].casefold()
-    cmd = row["cmd"].casefold()
-    digest = row["digest"].casefold()
-    evidence_id = row["evidence_id"]
     score = 0
-    for keyword in keywords:
-        hit = 0
-        if keyword in text:
-            hit += TEXT_WEIGHT
-        if keyword in cmd:
-            hit += CMD_WEIGHT
-        if keyword in digest:
-            hit += DIGEST_WEIGHT
-        canonical = canonical_evidence_id(keyword)
-        if canonical is not None and canonical == evidence_id:
-            hit += ID_WEIGHT
-        if hit == 0:
-            return None
-        score += hit
+    hits = 0
+    tag_hit = False
+    for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
+        raw = _raw_hit(keyword, canonical, row)
+        if not raw:
+            continue
+        hits += 1
+        if any(word_hit(tag, keyword) for tag in row["tags"]):
+            tag_hit = True
+        score += (raw * idf[index]) // 1000
+    floor = 1 if len(keywords) < _MULTI_MATCH_FROM else _MULTI_MATCH_FLOOR
+    # A tag is a synonym the owner wrote on purpose, so one tag match is a
+    # deliberate signal and beats the word-count floor that stops stray matches.
+    if hits < floor and not tag_hit:
+        return None
     return score
+
+
+def _document_frequencies(
+    keywords: list[str], canon_ids: list[str | None], corpus: list[dict]
+) -> list[int]:
+    """How many corpus rows each keyword reaches (the idf input)."""
+    counts = [0] * len(keywords)
+    for row in corpus:
+        for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
+            if _raw_hit(keyword, canonical, row):
+                counts[index] += 1
+    return counts
 
 
 def _cmd_bonus(cmd_query: str | None, row: dict) -> int | None:
@@ -284,6 +525,13 @@ def _matches_tags(requested: list[str], row: dict) -> bool:
     return all(tag in present for tag in requested)
 
 
+def _as_count(value: object) -> int:
+    """Usage counter from a row: non-negative int, anything else zero."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
 class Hit:
     """One ranked recall hit. Fields are display-ready and provenance-labelled."""
 
@@ -296,10 +544,32 @@ class Hit:
         self.evidence_id: str | None = row["evidence_id"]
         self.cmd: str = row["cmd"]
         self.exit_code: int | None = row["exit_code"]
+        self.uses: int = _as_count(row.get("uses"))
+        tool_value = row.get("tool")
+        self.tool: str = tool_value if isinstance(tool_value, str) else ""
+        self.last_ok: bool | None = row.get("last_ok") if isinstance(row.get("last_ok"), bool) else None
+        self.last_exit: int | None = row.get("last_exit") if isinstance(row.get("last_exit"), int) and not isinstance(row.get("last_exit"), bool) else None
         self.strength: int = strength
         self.recency: int = recency
 
     def line(self, index: int) -> str:
+        if self.kind == "command":
+            uses = f" · ran {self.uses}×" if self.uses > 1 else ""
+            outcome = ""
+            if self.last_ok is True:
+                exit_s = "" if self.last_exit is None else f" exit {self.last_exit}"
+                outcome = f" · last ok{exit_s}"
+            elif self.last_ok is False:
+                exit_s = "" if self.last_exit is None else f" exit {self.last_exit}"
+                outcome = f" · last FAILED{exit_s} — change it before reuse"
+            cmd = store.display_text(self.cmd, 120) or "(no command)"
+            return f"{index}. {self.provenance} · command · re-run to verify{uses}{outcome} · {cmd}"
+        if self.kind == "file":
+            uses = f" · used {self.uses}×" if self.uses > 1 else ""
+            tool = store.display_text(self.tool or "tool", 24)
+            key = store.display_text(self.cmd, 120) or "(no path)"
+            outcome = " · last FAILED" if self.last_ok is False else ""
+            return f"{index}. {self.provenance} · {tool} · reuse{uses}{outcome} · {key}"
         if self.kind == "evidence":
             evidence_id = store.display_text(self.evidence_id, 16) or "(no id)"
             exit_s = "" if self.exit_code is None else f" · exit {self.exit_code}"
@@ -328,6 +598,8 @@ def search(
     cmd: object = None,
     journal_rows: list[dict] | None = None,
     evidence_rows: list[dict] | None = None,
+    event_rows: list[dict] | None = None,
+    include_commands: bool = True,
 ) -> RecallResult:
     """Search the retained window. Reads the store unless rows are supplied.
 
@@ -338,6 +610,7 @@ def search(
     wanted_id = _validate_evidence_id(evidence_id)
     bounded = bounded_limit(limit)
     keywords = _keywords(query)
+    canon_ids = _canonical_keys(keywords)
     wanted_tags = _requested_tags(tags)
     cmd_filter = _blank_to_none(cmd)
 
@@ -357,7 +630,25 @@ def search(
             parsed = _as_evidence(row)
             if parsed is not None:
                 corpus.append(parsed)
+    # Reuse beats rewriting: a query also reaches commands that already solved a
+    # similar task. Skipped without a query (the plain recent window stays
+    # ledger-shaped) and skipped when the same command is already evidence.
+    if include_commands and (keywords or cmd_filter):
+        if event_rows is None:
+            supplied = journal_rows is not None or evidence_rows is not None
+            event_rows = [] if supplied else store.read_jsonl(store.events_path())
+        known = {store.fingerprint(row["cmd"]) for row in corpus if row["cmd"]}
+        for row in _command_rows(event_rows):
+            if store.fingerprint(row["cmd"]) in known:
+                continue
+            corpus.append(row)
+        for row in _file_rows(event_rows):
+            if store.fingerprint(row["cmd"]) in known:
+                continue
+            known.add(store.fingerprint(row["cmd"]))
+            corpus.append(row)
 
+    idf = [_idf(df, len(corpus)) for df in _document_frequencies(keywords, canon_ids, corpus)]
     matched: list[tuple[dict, int, int]] = []
     for seq, row in enumerate(corpus):
         if kind is not None and row["kind"] != kind:
@@ -369,9 +660,13 @@ def search(
         bonus = _cmd_bonus(cmd_filter, row)
         if bonus is None:
             continue
-        keyword_score = _keyword_score(keywords, row)
+        keyword_score = _keyword_score(keywords, canon_ids, row, idf)
         if keyword_score is None:
             continue
+        if row["kind"] in ("command", "file"):
+            keyword_score //= 2
+            if row.get("last_ok") is False:
+                keyword_score //= 2
         matched.append((row, keyword_score + bonus, seq))
 
     matched.sort(key=lambda item: (item[0]["ts"], item[2]))

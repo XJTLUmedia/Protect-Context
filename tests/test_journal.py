@@ -80,3 +80,44 @@ def test_render_recent_is_one_line_per_entry_and_defensively_bounded():
                + journal.TAG_COUNT_CAP * (journal.TAG_TEXT_CAP + 1)
                for line in lines[1:-1])
     assert lines[-1].startswith("Nudge:")
+
+
+def test_recent_with_total_reads_the_ledger_once(monkeypatch):
+    journal.add("decision", "only entry")
+    calls = []
+    original = store.read_jsonl
+
+    def counting(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(store, "read_jsonl", counting)
+    entries, total = journal.recent_with_total(5)
+    assert len(calls) == 1, "the journal view must not parse the ledger twice"
+    assert total == 1 and entries[0]["text"] == "only entry"
+
+
+def test_correction_ack_names_the_trusted_channel():
+    e = journal.add("correction", "stop folding dep bumps into releases")
+    ack = journal.render_ack(e, journal.count())
+    assert "logged correction" in ack
+    assert "/guard-note" in ack, "the operator promotion path must be discoverable"
+    assert "unverified" in ack
+
+
+def test_a_misspelled_satisfaction_tag_is_normalized_and_reported():
+    entry = journal.add("correction", "owner wanted the broad fix", ["dissatisfed", "agent"])
+    assert entry["tags"] == ["dissatisfied", "agent"]
+    ack = journal.render_ack(entry, 1)
+    assert "normalized to 'dissatisfied'" in ack
+    # The note is display-only: the frozen four-key row never gains extra fields.
+    stored = store.read_jsonl(store.journal_path())[-1]
+    assert set(stored) == {"ts", "type", "text", "tags"}
+    assert stored["tags"] == ["dissatisfied", "agent"]
+
+
+def test_a_lesson_without_a_trigger_tag_is_flagged():
+    entry = journal.add("decision", "take all follow-ups from a review", ["lesson"])
+    assert "no trigger tag" in journal.render_ack(entry, 1)
+    tagged = journal.add("decision", "take all follow-ups from a review", ["lesson", "followup"])
+    assert "no trigger tag" not in journal.render_ack(tagged, 2)

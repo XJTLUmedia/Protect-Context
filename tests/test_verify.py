@@ -157,6 +157,7 @@ def test_timeout_clamped_to_sane_upper_bound(monkeypatch):
 
 def test_timeout_uses_child_kill_on_non_posix(monkeypatch):
     class Process:
+        pid = 0
         killed = False
 
         def kill(self):
@@ -340,3 +341,111 @@ def test_verify_does_not_inherit_an_open_stdin():
     payload = json.loads(out)
     assert payload["exit"] != 124
     assert payload["ms"] < 1500
+
+
+def test_trust_issues_reports_a_failure_mask_once():
+    """A masked command is one issue, not a mask plus an `||` duplicate."""
+    issues = verify.trust_issues("npm test || true")
+    assert len(issues) == 1
+    assert "masks failure" in issues[0]
+
+    piped = verify.trust_issues("pytest -q | tail -5")
+    assert len(piped) == 1 and "pipeline" in piped[0]
+
+
+def test_recent_with_total_reads_the_ledger_once(monkeypatch):
+    verify.run_verify("true")
+    calls = []
+    original = store.read_jsonl
+
+    def counting(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(store, "read_jsonl", counting)
+    runs, total = verify.recent_with_total(5)
+    assert len(calls) == 1, "count and slice must come from one parse"
+    assert total == 1 and runs[0]["id"] == "ev-0001"
+
+
+def test_loop_key_is_memoised_and_still_guards_odd_input():
+    verify._loop_key_cached.cache_clear()
+    assert verify.loop_key("pytest -q") == "pytest -q"
+    info = verify._loop_key_cached.cache_info()
+    assert verify.loop_key("pytest -q") == "pytest -q"
+    assert verify._loop_key_cached.cache_info().hits == info.hits + 1
+
+    assert verify.loop_key("npm test || true") == "npm test"
+    assert verify.loop_key("pytest -q;") == "pytest -q"
+    assert verify.loop_key(None) == ""  # type: ignore[arg-type]
+
+
+def test_recent_view_shows_the_failure_payload_not_just_the_label():
+    ok = verify.run_verify("true")
+    bad = verify.run_verify("definitely-missing-binary-xyz")
+    text = verify.render_recent(verify.recent(5), 2)
+    assert f"{ok['id']} ok" in text
+    assert f"{bad['id']} FAIL" in text
+    assert "└" in text, "a non-ok row must carry its last digest line"
+    assert "not found" in text, "the failure text is the payload, not the label"
+    assert "fix the cause and re-verify" in text.lower()
+
+
+def test_untrusted_row_nudges_failure_and_untrusted_separately():
+    verify.run_verify("false")
+    text = verify.render_recent(verify.recent(1), 1)
+    assert "proves the check failed" in text
+    assert "cite evidence ids" not in text
+
+
+def test_evidence_can_be_read_back_by_id_after_the_window():
+    for _ in range(6):
+        verify.run_verify("true")
+    first = verify.recent(20)[0]
+    found = verify.find(first["id"].upper())
+    assert found is not None and found["id"] == first["id"], "ids are case-insensitive"
+    assert verify.find("ev-9999") is None
+    assert verify.find(None) is None
+    full = verify.render_entry(found)
+    assert full.startswith(f"PC verify {first['id']}")
+
+
+def test_pipefail_rewrite_is_exact_and_narrow():
+    assert verify.pipefail_rewrite("pytest -q | tail -3") == (
+        "bash -o pipefail -c 'pytest -q | tail -3'"
+    )
+    assert verify.pipefail_rewrite("bash -o pipefail -c 'a | b'") == ""
+    assert verify.pipefail_rewrite("pytest -q") == ""
+    assert verify.pipefail_rewrite("pytest -q || true") == ""
+    assert verify.pipefail_rewrite(None) == ""
+    piped = verify.run_verify("echo 'a|b' | tail -1")
+    assert verify.pipefail_rewrite(piped["cmd"]).startswith("bash -o pipefail -c 'echo ")
+
+
+def test_recent_window_uses_the_count_sidecar_instead_of_a_cold_parse():
+    verify.run_verify("true")
+    verify.run_verify("true")
+    rows, total = verify.recent_with_total(2)
+    assert total == 2
+    # Simulate a fresh process: no in-memory cache, only the sidecar on disk.
+    verify._VALID_RUNS_CACHE.clear()
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("the ledger must not be parsed when the sidecar is valid")
+
+    original = store.read_jsonl
+    store.read_jsonl = _explode
+    try:
+        rows, total = verify.recent_with_total(2)
+        assert total == 2
+        assert [row["id"] for row in rows] == [r["id"] for r in verify.recent(2)]
+    finally:
+        store.read_jsonl = original
+
+
+def test_a_stale_sidecar_is_discarded_not_trusted():
+    verify.run_verify("true")
+    verify.recent_with_total(1)  # warms the sidecar
+    store.write_json(store.verify_path().with_name("verify_count.json"), {"stamp": ["bogus"], "total": 999})
+    verify._VALID_RUNS_CACHE.clear()
+    assert verify.count() == 1

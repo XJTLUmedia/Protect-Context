@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from protect_context import recall, store
+from protect_context import loops, recall, store
 
 
 def _journal(*rows):
@@ -75,15 +75,18 @@ def test_rank_strength_then_recency_and_keeps_provenance():
     assert "unverified" in rendered.splitlines()[-1]
 
 
-def test_keywords_are_and_and_do_not_search_tags():
+def test_keywords_rank_by_match_count_and_also_search_tags():
     journal = [
         {"ts": "t1", "type": "decision", "text": "alpha lives in the ledger", "tags": ["other"]},
         {"ts": "t2", "type": "note", "text": "nothing to see", "tags": ["alpha"]},
     ]
     both = recall.search("alpha ledger", journal_rows=journal, evidence_rows=[])
-    assert [hit.text for hit in both.hits] == ["alpha lives in the ledger"]
+    # Two matched words beat one, so the decision ranks first; the tag-only row
+    # still appears because a tag is a synonym the owner wrote themselves.
+    assert [hit.text for hit in both.hits] == ["alpha lives in the ledger", "nothing to see"]
     tags_only = recall.search("alpha", journal_rows=journal[1:], evidence_rows=[])
-    assert tags_only.matched == 0
+    assert tags_only.matched == 1, "a tag term is searchable"
+    assert tags_only.hits[0].tags == ["alpha"]
 
 
 def test_tags_are_case_insensitive_and():
@@ -214,3 +217,165 @@ def test_recall_does_not_create_the_store():
     rendered = recall.render(result)
     assert rendered.startswith("PC recall · 0 hits · scanned 0")
     assert "broaden the query" in rendered.splitlines()[-1]
+
+
+def test_agent_provenance_is_case_insensitive_like_the_tag_filter():
+    rows = _journal(
+        {"ts": "2026-01-01T00:00:00.000Z", "type": "note", "text": "alpha", "tags": ["Agent"]}
+    )
+
+    by_query = recall.search("alpha", journal_rows=rows, evidence_rows=[])
+    assert [hit.provenance for hit in by_query.hits] == ["agent"]
+
+    by_tag = recall.search("", tags=["AGENT"], journal_rows=rows, evidence_rows=[])
+    assert [hit.provenance for hit in by_tag.hits] == ["agent"]
+
+
+def test_paraphrase_query_reaches_the_decision():
+    # The owner's question words differ from the entry's; AND over every word
+    # used to miss it entirely.
+    journal = [
+        {
+            "ts": "2026-10-29T18:43:00.000Z",
+            "type": "decision",
+            "text": "Owner took the three follow-ups (ev-0023): preserve unknown config keys.",
+            "tags": ["config"],
+        }
+    ]
+    result = recall.search(
+        "did the owner take all three follow-ups from the review?",
+        journal_rows=journal,
+        evidence_rows=[],
+        include_commands=False,
+    )
+    assert result.matched == 1
+    assert "three follow-ups" in result.hits[0].text
+
+
+def test_one_shared_word_cannot_answer_a_long_query():
+    journal = [
+        {"ts": "t1", "type": "note", "text": "the owner", "tags": []},
+        {"ts": "t2", "type": "note", "text": "owner prefers broad fixes over docs", "tags": []},
+    ]
+    result = recall.search(
+        "what did the owner say about tests and docs and release",
+        journal_rows=journal,
+        evidence_rows=[],
+        include_commands=False,
+    )
+    # One shared word ("owner") is not enough for a long query; two are.
+    assert [hit.text for hit in result.hits] == ["owner prefers broad fixes over docs"]
+
+
+def test_past_command_is_reusable_from_the_events_ledger():
+    events = [
+        {"ts": "2026-11-01T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "rsync -a src/ /backup/folder/"},
+        {"ts": "2026-11-02T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "rsync -a src/ /backup/folder/"},
+        {"ts": "2026-11-03T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "true", "ok": False},
+        {"ts": "2026-11-04T00:00:00.000Z", "kind": "tool_result", "tool": "bash", "ok": True},
+    ]
+    result = recall.search(
+        "copy folder backup",
+        journal_rows=[],
+        evidence_rows=[],
+        event_rows=events,
+    )
+    commands = [hit for hit in result.hits if hit.kind == "command"]
+    assert len(commands) == 1, "one row per command family"
+    assert commands[0].cmd == "rsync -a src/ /backup/folder/"
+    assert commands[0].uses == 2, "repeat count proves it worked more than once"
+    assert "re-run to verify" in recall.render(result)
+
+
+def test_a_command_already_in_evidence_is_not_repeated():
+    events = [{"ts": "2026-11-01T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "npm test"}]
+    evidence = [{"id": "ev-0001", "ts": "2026-11-01T00:00:00.000Z", "cmd": "npm test", "digest": "", "exit": 0}]
+    result = recall.search("npm test", journal_rows=[], evidence_rows=evidence, event_rows=events)
+    assert [hit.kind for hit in result.hits] == ["evidence"]
+
+
+def test_empty_query_keeps_the_recent_window_shape():
+    events = [{"ts": "2026-11-01T00:00:00.000Z", "kind": "tool_call", "tool": "bash", "cmd": "npm test"}]
+    result = recall.search(journal_rows=[], evidence_rows=[], event_rows=events)
+    assert result.hits == [] and result.scanned == 0
+
+
+def test_rare_words_outrank_common_ones():
+    # "owner" is in every row, "annoyed" in one: the rare word must decide.
+    journal = [
+        {"ts": f"t{i}", "type": "note", "text": "owner asked for a small change", "tags": []}
+        for i in range(6)
+    ]
+    journal.append({"ts": "t9", "type": "decision", "text": "owner prefers broad fixes", "tags": ["annoyed"]})
+    result = recall.search("owner annoyed", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].text == "owner prefers broad fixes"
+
+
+def test_tag_synonyms_bridge_a_vocabulary_gap():
+    # The owner's own words are the bridge: the text never says "annoyed".
+    journal = [
+        {"ts": "t1", "type": "decision", "text": "prefer the broad fix", "tags": ["annoyed", "narrow-patch"]}
+    ]
+    for query in ["why did the owner get annoyed", "narrow patch again"]:
+        hits = recall.search(query, journal_rows=journal, evidence_rows=[]).hits
+        assert hits and hits[0].text == "prefer the broad fix", query
+
+
+def test_command_hint_carries_its_last_observed_outcome():
+    events = [
+        {"ts": "t1", "session": "s", "kind": "tool_call", "tool": "bash", "cmd": "cp -r a/ b/"},
+        {"ts": "t2", "session": "s", "kind": "tool_result", "tool": "bash", "ok": True, "exit": 0},
+        {"ts": "t3", "session": "s", "kind": "tool_call", "tool": "bash", "cmd": "cp -r a/ b/"},
+        {"ts": "t4", "session": "s", "kind": "tool_result", "tool": "bash", "ok": False, "exit": 1},
+    ]
+    result = recall.search("cp copy", journal_rows=[], evidence_rows=[], event_rows=events)
+    hit = next(h for h in result.hits if h.kind == "command")
+    assert hit.uses == 2
+    assert hit.last_ok is False and hit.last_exit == 1
+    assert "last FAILED" in recall.render(result)
+
+
+def test_a_keyword_must_start_a_word():
+    rows = [
+        {"ts": "1", "type": "note", "text": "raise the threshold", "tags": []},
+        {"ts": "2", "type": "decision", "text": "the old policy is gone", "tags": []},
+    ]
+    hits = recall.search("old", journal_rows=rows, evidence_rows=[]).hits
+    assert [h.text for h in hits] == ["the old policy is gone"]
+    # Prefix morphology still works in the useful direction.
+    assert recall.search("thresh", journal_rows=rows, evidence_rows=[]).matched == 1
+    assert recall.word_hit("patches land", "patch")
+    assert not recall.word_hit("patches land", "atch")
+
+
+def test_an_ambiguous_outcome_is_not_attached_to_a_command():
+    events = [
+        {"kind": "tool_call", "session": "s", "tool": "bash", "cmd": "rsync a b", "ok": None},
+        {"kind": "tool_call", "session": "s", "tool": "bash", "cmd": "rsync c d", "ok": None},
+        # No cmd to correlate with, two calls outstanding: a guess would be a lie.
+        {"kind": "tool_result", "session": "s", "tool": "bash", "ok": False, "exit": 1},
+    ]
+    rows = recall._command_rows(events)
+    assert [r["last_ok"] for r in rows] == [None, None]
+    # A result that names its command pairs exactly, even after an overlap.
+    events[2]["cmd"] = "rsync a b"
+    rows = recall._command_rows(events)
+    paired = {r["cmd"]: (r["last_ok"], r["last_exit"]) for r in rows}
+    assert paired["rsync a b"] == (False, 1)
+    assert paired["rsync c d"] == (None, None)
+
+
+def test_a_read_tool_leaves_a_reusable_file_hint():
+    events = [
+        {"kind": "tool_result", "session": "s", "tool": "read", "cmd": "src/protect_context/store.py", "ok": True},
+        {"kind": "tool_result", "session": "s", "tool": "read", "cmd": "src/protect_context/store.py", "ok": True},
+        {"kind": "tool_result", "session": "s", "tool": "bash", "cmd": "pytest -q", "ok": True},
+    ]
+    result = recall.search("store.py", journal_rows=[], evidence_rows=[], event_rows=events)
+    kinds = [h.kind for h in result.hits]
+    assert kinds == ["file"], kinds
+    hit = result.hits[0]
+    assert hit.uses == 2 and hit.tool == "read"
+    assert "read · reuse" in hit.line(1)
+    # The key is a path, never a shell command: it may not form a loop streak.
+    assert loops.streaks(events, session="s") == []

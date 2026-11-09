@@ -113,8 +113,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_evidence(args: argparse.Namespace) -> int:
-    runs = verify.recent(args.limit)
-    print(verify.render_recent(runs, verify.count()))
+    if args.evidence_id:
+        entry = verify.find(args.evidence_id)
+        if entry is None:
+            print(f"evidence: no recorded run with id {store.display_text(args.evidence_id, 40)}")
+            print("Nudge: run `evidence` without --id to list the recent window.")
+            return 2
+        print(verify.render_entry(entry))
+        return 0
+    runs, total = verify.recent_with_total(args.limit)
+    print(verify.render_recent(runs, total))
     return 0
 
 
@@ -192,8 +200,8 @@ def cmd_note(args: argparse.Namespace) -> int:
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
-    entries = journal.recent(args.limit, args.type)
-    print(journal.render_recent(entries, journal.count(args.type), args.type))
+    entries, total = journal.recent_with_total(args.limit, args.type)
+    print(journal.render_recent(entries, total, args.type))
     return 0
 
 
@@ -294,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("evidence", help="recent verify runs")
     sp.add_argument("--limit", type=int, default=5)
+    sp.add_argument("--id", dest="evidence_id", default=None, help="show one run in full (ev-NNNN)")
     sp.set_defaults(func=cmd_evidence)
 
     sp = sub.add_parser("contract", help="contract store: list | add TEXT | remove ID")

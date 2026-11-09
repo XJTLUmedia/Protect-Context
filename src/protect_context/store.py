@@ -9,6 +9,7 @@ on both the Python and TypeScript sides, pinned identical by tests.
 
 from __future__ import annotations
 
+import copy
 import errno
 import hashlib
 import json
@@ -97,10 +98,6 @@ def verify_path() -> Path:
 
 def state_path() -> Path:
     return guard_dir() / "state.json"
-
-
-def lock_path() -> Path:
-    return guard_dir() / ".lock"
 
 
 def lease_path() -> Path:
@@ -326,11 +323,6 @@ def _snapshot_is_stale(
         # exceed the lease threshold. Keep the lock rather than steal it.
         return False
     return not _pid_is_live(owner.get("pid"))
-
-
-def _lease_is_stale(path: Path, stale_s: float) -> bool:
-    snapshot = _lease_snapshot(path)
-    return snapshot is not None and _snapshot_is_stale(snapshot, stale_s)
 
 
 def _owner_token(owner: dict | None) -> str | None:
@@ -568,12 +560,23 @@ def store_lock(
 
     path, token = _acquire_lease(path, timeout_s, stale_s, retry_s)
     held[key] = 1
+    error: BaseException | None = None
     try:
         with _open_lock(path.parent) as lf, _exclusive_flock(lf):
             yield
+    except BaseException as exc:
+        error = exc
+        raise
     finally:
         held.pop(key, None)
-        _release_lease(path, token)
+        try:
+            _release_lease(path, token)
+        except Exception:
+            # A failed release must never replace the error that aborted the
+            # protected section: that one is the actionable cause, and this one
+            # stays attached to it as __context__.
+            if error is None:
+                raise
 
 
 def ledger_files(path: Path) -> list[Path]:
@@ -589,14 +592,71 @@ def ledger_files(path: Path) -> list[Path]:
     return files
 
 
+# Journal tags whose rows must outlive ledger rotation: a lesson is durable by
+# definition, but the journal rotates like any other ledger, so rotation would
+# eventually delete the oldest lessons. They are carried into the fresh live
+# file (deduped) instead.
+PINNED_TAGS = frozenset(("lesson",))
+
+
+def _row_is_pinned(row: dict) -> bool:
+    tags = row.get("tags")
+    if not isinstance(tags, list):
+        return False
+    return any(isinstance(tag, str) and tag.casefold() in PINNED_TAGS for tag in tags)
+
+
+def _row_key(row: dict) -> tuple:
+    return (row.get("ts"), row.get("text"))
+
+
+def _pinned_from_dropped_segment(path: Path) -> list[dict]:
+    """Pinned rows held by the segment rotation is about to overwrite.
+
+    Must run BEFORE the shift: the segment at the drop index is replaced in
+    place, so its old contents are gone afterwards.
+    """
+    if path.name != journal_path().name:
+        return []
+    dropped = path.with_name(f"{path.stem}.{max(1, LEDGER_SEGMENTS)}{path.suffix}")
+    if not dropped.exists():
+        return []
+    return [row for row in read_jsonl(dropped) if isinstance(row, dict) and _row_is_pinned(row)]
+
+
+def _carry_pinned_rows(path: Path, carried: list[dict]) -> None:
+    """Copy carried lessons into the fresh live file, once.
+
+    A lesson copied at one rotation is still present after the next, so rows
+    already surviving in another segment are skipped: each lesson is copied
+    when its original segment is dropped, not on every rotation.
+    """
+    if not carried:
+        return
+    surviving = {_row_key(row) for row in read_jsonl(path) if isinstance(row, dict)}
+    fresh = [row for row in carried if _row_key(row) not in surviving]
+    if not fresh:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            for row in fresh:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        # Best-effort: a lesson that cannot be carried must never break the
+        # append that triggered the rotation.
+        return
+
+
 def _rotate_ledger(path: Path) -> None:
     """Shift segments down one slot (dropping the oldest) and start a fresh
     live file. Must run under the store lease: callers hold it via append."""
+    carried = _pinned_from_dropped_segment(path)
     for index in range(LEDGER_SEGMENTS - 1, 0, -1):
         src = path.with_name(f"{path.stem}.{index}{path.suffix}")
         if src.exists():
             src.replace(path.with_name(f"{path.stem}.{index + 1}{path.suffix}"))
     path.replace(path.with_name(f"{path.stem}.1{path.suffix}"))
+    _carry_pinned_rows(path, carried)
 
 
 def _maybe_rotate(path: Path) -> None:
@@ -647,7 +707,13 @@ def _append_unlocked(path: Path, entry: dict) -> None:
 def _open_lock(directory: Path | None = None):
     directory = guard_dir() if directory is None else directory
     directory.mkdir(parents=True, exist_ok=True)  # lock file lives here
-    return open(directory / ".lock", "a+", encoding="utf-8")
+    lock_file = directory / ".lock"
+    try:
+        return open(lock_file, "a+", encoding="utf-8")
+    except OSError as exc:
+        # Surface the path: a lock that cannot be opened otherwise fails later
+        # as an anonymous permission error inside the lease logic.
+        raise OSError(f"cannot open store lock {lock_file}: {exc}") from exc
 
 
 def append_jsonl(path: Path, entry: dict) -> dict:
@@ -672,22 +738,116 @@ def locked_append(path: Path, factory: Callable[[], dict]) -> dict:
     return entry
 
 
+# Parsed-ledger cache: {path: (stamp, rows)}. The stamp is the per-segment
+# (name, mtime_ns, size) tuple, so any append or rotation invalidates it without
+# a bespoke invalidation hook — the same fileStamp idea the extension uses.
+# Bounded so a pathological ledger cannot pin memory: rows above the cap are
+# simply not cached. The lock only guards the dict, never a read.
+_READ_CACHE: dict[Path, tuple[tuple[tuple[str, int, int], ...], list[dict]]] = {}
+_READ_CACHE_MAX_ROWS = 50_000
+_READ_CACHE_LOCK = threading.Lock()
+
+
+def ledger_stamp(path: Path) -> tuple[tuple[str, int, int], ...]:
+    stamp: list[tuple[str, int, int]] = []
+    for segment in ledger_files(path):
+        try:
+            st = segment.stat()
+        except OSError:
+            continue
+        stamp.append((segment.name, st.st_mtime_ns, st.st_size))
+    return tuple(stamp)
+
+
 def read_jsonl(path: Path) -> list[dict]:
     """Read a ledger oldest-row-first across its rotated segments; blank or
-    malformed lines are skipped (best-effort)."""
+    malformed lines are skipped (best-effort).
+
+    The parsed rows are memoized against the segment stamps, so repeated reads
+    of an unchanged ledger cost one ``stat`` per segment instead of a full
+    parse. Callers must treat the result as read-only: it is shared.
+    """
+    stamp = ledger_stamp(path)
+    with _READ_CACHE_LOCK:
+        cached = _READ_CACHE.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    rows = _parse_segments(path)
+    if len(rows) <= _READ_CACHE_MAX_ROWS:
+        with _READ_CACHE_LOCK:
+            _READ_CACHE[path] = (stamp, rows)
+    return rows
+
+
+def _parse_segments(path: Path) -> list[dict]:
     out: list[dict] = []
     for segment in ledger_files(path):
-        for line in _read_text_safe(segment).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(obj, dict):
-                out.append(obj)
+        out.extend(_parse_lines(_read_text_safe(segment)))
     return out
+
+
+def _parse_lines(text: str) -> list[dict]:
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def tail_jsonl(path: Path, count: int, *, max_bytes: int = 8_388_608) -> list[dict] | None:
+    """Last ``count`` rows from the live segment, or None when that is not enough.
+
+    ``recent``-style callers need the newest rows only, and those live in the
+    live file: reading it backwards avoids parsing the rotated segments
+    (measured ~54 ms of parse for a 5-row window at cap size versus
+    0.008 ms for an 8 KB tail). The scan doubles its block size backwards until
+    it has ``count + 1`` newlines or reaches the start of the file, so it stays
+    cheap for a small window on a large segment instead of refusing outright
+    above a fixed threshold (the earlier 256 KB cap declined on any real
+    ledger). Returns None instead of a short list whenever the answer might be
+    incomplete — a torn last line, fewer rows than asked for, or a live segment
+    larger than ``max_bytes`` — so the caller can fall back to a full read.
+    """
+    if count <= 0:
+        return []
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size <= 0:
+        return []
+    if size > max_bytes:
+        return None
+    block = 4096
+    data = b""
+    pos = size
+    try:
+        with open(path, "rb") as handle:
+            while pos > 0 and data.count(b"\n") <= count:
+                step = min(block, pos)
+                pos -= step
+                handle.seek(pos)
+                data = handle.read(step) + data
+                block = min(block * 2, max_bytes)
+    except OSError:
+        return None
+    if not data.endswith(b"\n"):
+        return None  # torn tail: the newest row may still be mid-write
+    lines = data.split(b"\n")
+    lines.pop()  # trailing empty element after the final newline
+    if pos > 0:
+        lines.pop(0)  # first element is a partial line from the block boundary
+    if len(lines) < count:
+        return None
+    rows = _parse_lines(b"\n".join(lines[-count:]).decode("utf-8", "replace"))
+    return rows if len(rows) == count else None
 
 
 def _read_text_safe(path: Path) -> str:
@@ -712,6 +872,8 @@ def _valid_config_value(key: str, val: object) -> bool:
             return val >= 1
         if key == "ctx_warn_pct":
             return 0 <= val <= 100
+        if key == "brief_max_precedents":
+            return 0 <= val <= 10
         return val >= 0
     if isinstance(default, list):
         return isinstance(val, list) and all(isinstance(v, str) for v in val)
@@ -760,7 +922,7 @@ def load_state() -> dict:
     legacy top-level ``brief_digest``/``notify_watermarks`` pair is migrated into
     the current session's entry in memory; the file is only rewritten on save.
     """
-    st = json.loads(json.dumps(DEFAULT_STATE))
+    st = copy.deepcopy(DEFAULT_STATE)
     data = read_json(state_path())
     if not isinstance(data, dict):
         return st
@@ -770,17 +932,29 @@ def load_state() -> dict:
     }
     for key, val in data.items():
         st[key] = val
-    if not isinstance(st.get("sessions"), dict):
-        st["sessions"] = {}
+    sessions = st.get("sessions")
+    # A non-dict session entry is corrupt data: keep every read path crash-free
+    # and never let such an entry reach save_state, which prunes by reading
+    # each entry's timestamps.
+    st["sessions"] = {
+        sid: entry
+        for sid, entry in (sessions if isinstance(sessions, dict) else {}).items()
+        if isinstance(sid, str) and isinstance(entry, dict)
+    }
     current = st.get("current_session")
     sid = current.get("id") if isinstance(current, dict) else None
-    if isinstance(sid, str) and sid and sid not in st["sessions"]:
+    if (
+        isinstance(current, dict)
+        and isinstance(sid, str)
+        and sid
+        and sid not in st["sessions"]
+    ):
         migrated = {"started": current.get("started"), "git_head": current.get("git_head")}
         if isinstance(legacy["brief_digest"], str):
             migrated["brief_digest"] = legacy["brief_digest"]
         if isinstance(legacy["notify_watermarks"], dict):
             migrated["notify_watermarks"] = legacy["notify_watermarks"]
-        if len(migrated) > 2 or legacy["brief_digest"] or legacy["notify_watermarks"]:
+        if legacy["brief_digest"] or legacy["notify_watermarks"]:
             st["sessions"][sid] = migrated
     return st
 

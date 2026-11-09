@@ -58,6 +58,10 @@ DEFAULT_CONFIG: dict = {
     "diff_warn_files": 10,
     "ctx_warn_pct": 70,
     "brief_mode": "changed",
+    # How many `lesson` precedents the brief re-injects (0 disables the
+    # section). Owner-tunable because a project with many lessons needs more
+    # than the default three.
+    "brief_max_precedents": 3,
     "risk_confirm": True,
     "preflight_tools": ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
 }

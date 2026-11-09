@@ -74,3 +74,12 @@ def test_orientation_resolves_nested_start_to_git_root(tmp_path):
     assert scan["root"] == tmp_path.resolve()
     assert "AGENTS.md" in scan["conventions"]
     assert dict(scan["languages"])["Python"] == 1
+
+
+def test_child_summary_counts_every_visible_entry(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    for index in range(orientation.MAX_CHILDREN + 4):
+        (pkg / f"f-{index:02d}.txt").write_text("x\n")
+    rendered = orientation.digest(tmp_path)
+    assert "+4 more" in rendered

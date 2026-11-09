@@ -24,7 +24,7 @@ Principles: advisory-first (nudge before block); block only for repeated identic
 | 6 | Losing earlier context/constraints | Persistent journal (`.agent-guard/journal.jsonl`, decisions/notes); owner task anchor; trusted entries re-injected on change and after every compaction (including mid-run threshold/overflow); model notes re-injected as explicitly unverified; `guard_journal` reads the full text; survives restarts | ext + core |
 | 7 | Repeated corrections of same behavior | Corrections journal entries with tags, re-injected like contract; `guard_note type=correction` | ext + core |
 | 8 | Large diffs → review burden | Diff gates: warn 400 lines / 10 files, hard 800 lines (notify + widget + status verdict, split advice) | ext + core |
-| 9 | Repetitive debugging loops | Command fingerprint streaks; identical failing bash blocked on 3rd attempt with change-strategy reason | ext + core |
+| 9 | Repetitive debugging loops | Command fingerprint streaks; identical failing bash blocked on 3rd attempt with change-strategy reason. A masked exit 0 (`cmd \|\| true`) or a pipeline that checked only its last stage counts as an unproven attempt, so masking cannot walk a command back under the threshold | ext + core |
 | 10 | Environment/sandbox/tool failures | `guard_preflight` (tool presence + versions, git repo check); structured error capture in events | core |
 | 11 | Too many permission interruptions | One grouped risk-confirm for dangerous bash (replaces ad-hoc surprises); preflight reduces mid-task discovery | ext |
 | 12 | Token/API cost & latency | Context usage % watermarks + /compact advice; char budget on tool telemetry; brief injection only-on-change; compact output formats everywhere | ext + core |
@@ -93,6 +93,9 @@ built-in defaults  <  ~/.config/protect-context/  <  .agent-guard/
   file is bounded to the 8 newest sessions (`SESSION_KEEP`), always keeping the
   current session.
   current session.
+- **Rotation keeps lessons:** a `journal` row tagged `lesson` is copied into the
+  fresh live file when its segment is dropped, once, so a durable precedent
+  cannot be deleted by size-based rotation.
 - **Ledger bounding:** `events.jsonl`, `verify_runs.jsonl` and `journal.jsonl`
   rotate to `<stem>.1.jsonl` … `<stem>.3.jsonl` once a live file passes 1 MiB
   (`LEDGER_MAX_BYTES`, `LEDGER_SEGMENTS`), dropping the oldest segment. Readers
@@ -122,10 +125,41 @@ built-in defaults  <  ~/.config/protect-context/  <  .agent-guard/
 
 ## 3. Python package `src/protect_context/`
 
+Journal entry shape stays frozen (`ts`, `type`, `text`, `tags`); two tag
+conventions make an entry reusable rather than merely stored:
+`lesson` marks a durable precedent that the brief re-injects every turn (ranked
+by task relevance, cap `brief_max_precedents`, default 3, 0 disables, ahead of
+the recent decision/note caps), and `satisfied` / `dissatisfied` on a
+correction records how the owner reacted plus the action that caused it.
+Recall is paraphrase-tolerant: stopwords are dropped, keywords match only at a
+word start (`old` does not hit `threshold`, `patch` still finds `patches`), tags
+are searched as synonyms (one tag match satisfies the multi-word floor on its
+own), hits are rarity-weighted with integer idf math mirrored in both runtimes so
+the two surfaces cannot disagree (a query of 3+ words otherwise needs 2 real
+matches), and a query also reaches past successful `bash` commands from
+`events.jsonl` as half-weight `command` rows — paired with their last
+`tool_result` outcome (by command when the result names one, otherwise only when
+exactly one call is outstanding, so an overlap is never guessed), with
+`last FAILED` families demoted — plus `file` rows for non-shell tools (a
+`read`/`edit`/search call records the path or pattern it touched) so a repeated
+chore reuses what already worked instead of re-deriving it. Only `bash` and
+`guard_verify` rows may form a loop streak; reuse keys are paths, not commands.
+
+Ledger reads are memoized against per-segment `(name, mtime_ns, size)` stamps
+(`store.read_jsonl`, `verify._valid_runs`), so a repeat read costs one `stat`
+per segment rather than a parse, and `store.tail_jsonl` reads only the live
+segment for recent-row windows — scanning backwards in doubling blocks, so a
+small window on a large segment stays cheap — returning None (fall back to a
+full read) when it cannot prove the answer complete. `verify_count.json` carries
+the valid-row total with the same stamp, so a cold process can answer
+`count()`/`recent(N)` without parsing the ledger; a stamp mismatch discards it
+instead of trusting it, and it is written by an append only when the previous
+total was already known.
+
 Modules: `store.py` (paths, ensure, jsonl append/read + flock, config load/merge, state), `contract.py` (CRUD + DEFAULT_CONTRACT), `journal.py`, `loops.py` (streaks from events), `diffscope.py` (git numstat parser + verdict), `verify.py` (subprocess runner + evidence ledger), `preflight.py`, `budget.py` (chars/token estimate: chars/4, per-tool breakdown), `orientation.py` (tree ≤2 levels, language counts by extension, conventions-file detection), `report.py` (status dashboard), `cli.py`, `mcp_server.py`, `defaults.py` (DEFAULT_CONTRACT, DEFAULT_CONFIG — single source for both).
 
 CLI verbs (mirror MCP tools; exit 0 ok / 1 warning triggered / 2 error):
-`init · status · verify CMD · evidence · contract list|add TEXT|remove ID · note TYPE TEXT [--tags a,b] · loops · diff · preflight · budget`
+`init · status · verify CMD · evidence [--limit N] [--id ev-NNNN] · contract list|add TEXT|remove ID · note TYPE TEXT [--tags a,b] · loops · diff · preflight · budget`
 
 `pyproject.toml`: name `protect-context`, `requires-python >=3.10`, deps `fastmcp>=3,<4`; dev: `pytest`. Dev setup: `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`.
 
@@ -135,9 +169,9 @@ CLI verbs (mirror MCP tools; exit 0 ok / 1 warning triggered / 2 error):
 | --- | --- | --- |
 | `guard_status` | — | dashboard: session, Δdiff, loop streaks, evidence count, contract size, last verify |
 | `guard_verify` | `command: str, timeout_s: int = 180` | evidence id, exit, digest; records to verify_runs.jsonl |
-| `guard_evidence` | `limit: int = 5` | recent verify runs |
+| `guard_evidence` | `limit: int = 5, evidence_id?: str` | recent verify runs (each non-ok row carries its last output line), or one run in full by id |
 | `guard_contract` | `action: "list"\|"add"\|"remove", text?, id?` | updated contract view |
-| `guard_note` | `type: "decision"\|"correction"\|"risk"\|"note", text, tags: [str] = []` | ack |
+| `guard_note` | `type: "decision"\|"correction"\|"risk"\|"note", text, tags: [str] \| null = null` | ack |
 | `guard_loop_check` | — | failing-command streaks + advice |
 | `guard_diff_audit` | `baseline: str = null` | numstat vs HEAD/baseline, verdict vs thresholds |
 | `guard_preflight` | — | tool presence/versions, git-repo check |
@@ -169,7 +203,7 @@ Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi impor
 Event behaviors (all thresholds from config):
 
 - `session_start`: ensure store; new session id; record git HEAD (null if no repo); load config/contract/journal; render widget.
-- `before_agent_start`: build compact brief (`task:` line, contract ≤12 lines, 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified model notes, open loops ≤2, last evidence, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
+- `before_agent_start`: build compact brief (`task:` line ≤400 chars, contract ≤12 lines, 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified corrections, 2 unverified model notes, open loops ≤2, last evidence with its trust label, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
 - `context`: only while a mid-run re-injection is pending (armed by `session_compact`) — if the conversation holds no persisted `guard-brief` message, append `{role:"custom", customType:"guard-brief", content, display:false}` to `event.messages`. The result is per-request, so it is re-applied on each request until a persisted block is seen; with no pending flag the handler is an O(1) no-op.
 - `input`: capture the first substantive owner prompt (≥20 chars, not a slash command) as `state.task` (source `prompt`) and invalidate the brief digest, so `task:` is re-injected on that same turn. `/guard-task` writes source `owner` and always wins; short follow-ups ("continue") never replace a task.
 - `tool_call` (bash only): (a) risk patterns → `ctx.hasUI && risk_confirm` → single `ctx.ui.confirm("Risky command", …)`; no-UI → log only, never block; a declined confirm appends `tool_call` (`cmd`, `ok=false`); (b) loop check: prior failed attempts for fingerprint ≥ `loop_block_after - 1` → append `tool_call` (`cmd`, `ok=false`) and return `{block:true, reason:"guard: '<cmd>' already failed N times this session — do not re-run unchanged; change approach or read the error. (Raise loop_block_after in .agent-guard/config.json to override.)"}`; (c) else append `tool_call` event with `cmd`.
