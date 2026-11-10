@@ -54,4 +54,4 @@ Nudge: this run is recorded, but exit 0 here is not evidence of success.
 checks ok: loop brake blocked the third `false`; masked exit 0 is UNTRUSTED
 ```
 
-`docs/assets/demo.gif` is an asciinema-style rendering of this transcript (`agg` 1.9.0). It is the loop-brake demo, not a recording of the pi status widget.
+The README GIF at `docs/assets/demo.gif` is a separate productivity explainer. The transcript above is this script's output. The pi status widget is a different illustration.

@@ -9,7 +9,7 @@ description = "protect-context agent guardrail suite: shared store, MCP server (
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Zhenwei Yu", email = "xjtlumedia@gmail.com" }]
+authors = [{ name = "Alex Yu", email = "xjtlumedia@gmail.com" }]
 keywords = [
   "mcp",
   "model-context-protocol",

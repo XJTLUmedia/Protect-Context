@@ -29,7 +29,7 @@ visible *before* they cost you a session.
 
 ![protect-context injects a session brief — contract, decisions, corrections, loops, last evidence — before the agent starts working](./preview.png)
 
-![Terminal recording of guard_verify: two failures of false, the third attempt blocked, then a masked || true exit 0 labelled UNTRUSTED](./docs/assets/demo.gif)
+![Protect-Context demo: "Stop wasting agent sessions." An agent fails pytest tests/test_auth.py the same way twice (ev-0012, ev-0013), and the third identical run is blocked; "npm test || true" is flagged UNTRUSTED, while a real "npm test" is recorded as ev-0042 OK; and guard_recall "auth timeout" pulls the auth-timeout lesson from the local journal ("mock the clock, don't bump the timeout") with no vector database and no network.](./docs/assets/demo.gif)
 
 One project-local `.agent-guard/` store · three interfaces backed by the same
 logic:
