@@ -91,6 +91,7 @@ instead of asserted.
   separate `FileNotFoundError` failures. `tests/conftest.py` now raises one
   `pytest.UsageError` naming the missing binary.
 - README demo GIF (`docs/assets/demo.gif`) replaced with a productivity explainer covering the loop brake, UNTRUSTED versus recorded evidence, and local recall.
+- `vendor/` checkouts are registered in `.gitmodules` and fetched by CI. They were gitlinks with no URL, so `actions/checkout` died in `git submodule foreach` before pytest or the extension suite could start.
 
 ## 3.2.1
 
