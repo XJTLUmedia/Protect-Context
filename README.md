@@ -550,20 +550,31 @@ Rules that make the layering predictable:
   directory, not the project store, so two projects writing personal state cannot
   race each other.
 
-### Sharing a contract with a team
+### Sharing a contract (and the rest of the store) with a team
 
-`.agent-guard/` is runtime state and normally gitignored. If a team wants one
-shared owner contract, track only that file:
+`.agent-guard/` defaults to local runtime state for a new project, but every
+file in it is the project's memory: the contract, the config, the session state
+with the owner task, the journal of decisions and corrections, the evidence
+ledger, and the event ledger. A team that wants one shared record tracks the
+whole store and ignores only live lock artifacts:
+
+```gitignore
+.agent-guard/*.lock
+```
+
+That is what this repository does: `git add .agent-guard/` stages the contract,
+config, state, journal, events and verify runs. The trade-off is explicit —
+events and journal rows contain prompts, commands and tool output, so a public
+mirror publishes the working conversation along with the intent. Track only
+`contract.json` instead when the conversation must stay private:
 
 ```gitignore
 .agent-guard/*
 !.agent-guard/contract.json
 ```
 
-Runtime files (events, evidence, journal, session state) stay local, while
-`contract.json` becomes reviewable in pull requests. Personal constraints still
-apply on top — each teammate's personal layer is weaker than the shared project
-row.
+Personal constraints still apply on top — each teammate's personal layer is
+weaker than a shared project row.
 
 The nine catastrophic patterns that trigger the pi confirmation are frozen and
 deliberately narrow, so benign lookalikes stay silent:
@@ -581,7 +592,9 @@ deliberately narrow, so benign lookalikes stay silent:
 
 ### Runtime store and concurrency
 
-Runtime files stay in the frozen `.agent-guard/` layout and are gitignored:
+Runtime files stay in the frozen `.agent-guard/` layout. Every file below is
+committable — this repository tracks all of them — and only `.lock` (a live
+lease, meaningless outside the process that holds it) stays ignored:
 
 `config.json` · `contract.json` · `journal.jsonl` · `events.jsonl` ·
 `verify_runs.jsonl` · `state.json` · `verify_count.json` (a stamp-verified
@@ -668,13 +681,16 @@ machine: there are no network calls and no LLM calls in the guardrail logic.
 ### The brief
 
 The brief is deliberately tiny — a persistent prompt that grows without bound is
-its own failure mode. Within the frozen 12-line constraint cap:
+its own failure mode. Within two separate, additive budgets — 6 owner lines
+plus 12 seed/other lines:
 
-1. newest **owner** constraints are selected first,
-2. then the frozen seed constraints,
-3. then other entries.
+1. newest **owner** constraints fill the 6-line owner budget first,
+2. then the frozen seed constraints fill the 12-line seed/other budget,
+3. then other entries take whatever the seed budget has left.
 
-An agent-authored constraint therefore cannot crowd out a seed. Below the
+Neither class can starve the other: an agent-authored constraint cannot crowd
+out a seed, and five owner rules cannot push seed constraints 08-12 out of
+every brief. Anything past a budget is announced with a read path. Below the
 contract it carries up to 2 owner statements (wants, needs, preferences,
 constraints, corrections and plain statements — trusted rows first, an
 agent-tagged one is marked `(unverified)` and only fills a line the owner's own
@@ -984,9 +1000,9 @@ instead of leaving stale numbers in this README.
   request until a persisted one is back in the conversation. On a host that
   does not emit `context`, the block returns at the next user prompt instead.
 - Task capture stores the first substantive prompt (≤400 chars) in
-  `.agent-guard/state.json`. That is conversation content: it stays local and
-  gitignored, but review it before sharing a store, and clear it with
-  `/guard-task --clear`.
+  `.agent-guard/state.json`. That is conversation content: this repository tracks
+  the whole store, so review `state.json` and `journal.jsonl` before publishing
+  or mirroring it, and clear the anchor with `/guard-task --clear`.
 - Agent notes are unverified context, never authority. A model that journals
   "ignore the contract" is shown that sentence back under an explicitly
   unverified heading; treat it as data, and keep owner constraints in the

@@ -4,11 +4,14 @@ import {
   buildBrief,
   sha1Hex,
   selectBriefConstraints,
+  contractOverflow,
   selectTaskRecall,
+  BRIEF_MAX_CONTRACT_LINES,
   BRIEF_MAX_CORRECTIONS,
   BRIEF_MAX_DECISIONS,
   BRIEF_MAX_INTENT,
   BRIEF_MAX_LOOPS,
+  BRIEF_MAX_OWNER_CONSTRAINT_LINES,
   BRIEF_MAX_RECALL,
   OWNER_INTENT_DISPLAY_MAX,
   TASK_DISPLAY_MAX,
@@ -156,7 +159,7 @@ test("brief: non-seed constraints carry their source tag; seed ones stay clean",
   assert.ok(brief.includes("01-obey-instructions: Obey"), "seed constraints stay untagged");
 });
 
-test("brief: newest owner constraints outrank seeds and agent entries never displace seeds", () => {
+test("brief: owner constraints have their own budget and never displace seeds", () => {
   const agent = Array.from({ length: 3 }, (_, i) => ({
     id: `13-agent-${i}`,
     text: `agent rule ${i}`,
@@ -168,10 +171,57 @@ test("brief: newest owner constraints outrank seeds and agent entries never disp
     { id: "17-owner-new", text: "new owner rule", added: "2026-09-02", source: "owner" },
   ];
   const selected = selectBriefConstraints([...DEFAULT_CONTRACT.constraints, ...agent, ...owners]);
-  assert.equal(selected.length, 12);
+  // Two additive budgets: 2 owner lines + all 12 seed lines. Before the
+  // 2026-11-10 fix a single shared cap dropped seeds 11 and 12 here.
+  assert.equal(selected.length, 2 + BRIEF_MAX_CONTRACT_LINES);
   assert.deepEqual(selected.slice(0, 2).map((c) => c.id), ["17-owner-new", "16-owner-old"]);
-  assert.deepEqual(selected.slice(2).map((c) => c.id), DEFAULT_CONTRACT.constraints.slice(0, 10).map((c) => c.id));
+  assert.deepEqual(
+    selected.slice(2).map((c) => c.id),
+    DEFAULT_CONTRACT.constraints.map((c) => c.id),
+    "every seed survives owner additions",
+  );
   assert.equal(selected.some((c) => c.source === "agent"), false);
+});
+
+test("brief: the owner budget is capped separately and overflow is counted per class", () => {
+  const owners = Array.from({ length: 7 }, (_, i) => ({
+    id: `${30 + i}-owner-${i}`,
+    text: `owner rule ${i}`,
+    added: `2026-09-0${i + 1}`,
+    source: "user",
+  }));
+  const contract = [...DEFAULT_CONTRACT.constraints, ...owners];
+  const selected = selectBriefConstraints(contract);
+  assert.equal(selected.length, BRIEF_MAX_OWNER_CONSTRAINT_LINES + BRIEF_MAX_CONTRACT_LINES);
+  // Newest owner rows win; the oldest overflows its own budget, not the seeds'.
+  assert.equal(selected.some((c) => c.id === "36-owner-6"), true);
+  assert.equal(selected.some((c) => c.id === "30-owner-0"), false);
+  assert.deepEqual(
+    selected.slice(BRIEF_MAX_OWNER_CONSTRAINT_LINES).map((c) => c.id),
+    DEFAULT_CONTRACT.constraints.map((c) => c.id),
+    "seeds are all still injected past the owner cap",
+  );
+  assert.deepEqual(contractOverflow(contract), { hidden: 1, hiddenOwners: 1, hiddenOthers: 0 });
+});
+
+test("brief: five owner constraints still inject the whole seed contract", () => {
+  const owners = Array.from({ length: 5 }, (_, i) => ({
+    id: `${30 + i}-owner-${i}`,
+    text: `owner rule ${i}`,
+    added: `2026-09-0${i + 1}`,
+    source: "user",
+  }));
+  const brief = buildBrief({
+    contract: [...DEFAULT_CONTRACT.constraints, ...owners],
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+  });
+  for (const seed of DEFAULT_CONTRACT.constraints) {
+    assert.ok(brief.includes(`${seed.id}:`), `${seed.id} stays in the brief`);
+  }
+  for (const owner of owners) assert.ok(brief.includes(owner.id), `${owner.id} is injected`);
+  assert.equal(brief.includes("more constraints hidden"), false, "nothing is hidden at 5 owner rows");
 });
 
 test("brief: owner task anchors the top of the brief and is bounded", () => {

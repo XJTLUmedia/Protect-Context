@@ -477,6 +477,22 @@ def render_recent(entries: list[dict], total: int, jtype: str | None = None) -> 
     return "\n".join(lines)
 
 
+def intent_classified(entries: list[dict] | None = None) -> list[tuple[dict, list[str]]]:
+    """Every journal row that expresses owner intent, oldest first, UNCAPPED.
+
+    ``intent_with_total`` pages the read view at ``READ_LIMIT_MAX``. The brief
+    needs the whole length to report ``+N more owner statements`` honestly, so
+    the classifier is reachable without a page — passing ``journal.length`` into
+    a paging function was silently capped at 20 on both runtimes, which made the
+    brief's overflow count lie (2026-11-10 cross-runtime check).
+    """
+    rows = store.read_jsonl(store.journal_path()) if entries is None else entries
+    classified = [
+        (entry, _entry_intent(entry)) for entry in rows if isinstance(entry, dict)
+    ]
+    return [(entry, kinds) for entry, kinds in classified if kinds]
+
+
 def intent_with_total(
     limit: int = READ_LIMIT_DEFAULT,
 ) -> tuple[list[tuple[dict, list[str]]], int, dict[str, int]]:
@@ -488,9 +504,7 @@ def intent_with_total(
     still captured. ``counts`` covers every row, not the page, so a bounded
     render never lies about how much the owner asked for.
     """
-    entries = [entry for entry in store.read_jsonl(store.journal_path()) if isinstance(entry, dict)]
-    classified = [(entry, _entry_intent(entry)) for entry in entries]
-    classified = [(entry, kinds) for entry, kinds in classified if kinds]
+    classified = intent_classified()
     counts = {
         tag: sum(1 for _entry, kinds in classified if tag in kinds) for tag in INTENT_KINDS
     }

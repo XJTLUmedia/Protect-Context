@@ -926,7 +926,7 @@ def _valid_config_value(key: str, val: object) -> bool:
     return isinstance(val, str)
 
 
-def load_config() -> dict:
+def load_config(create: bool = True) -> dict:
     """Load config merged weakest-first: DEFAULT_CONFIG, then the personal
     layer (~/.config/protect-context/config.json), then this project's
     config.json (SPEC §2). Corrupt, missing, or wrong-typed values fall back to
@@ -935,8 +935,12 @@ def load_config() -> dict:
     Unknown keys are preserved verbatim (strongest layer wins) instead of being
     silently dropped, so an owner can park personal knobs — or another tool's
     settings — in the same file. The guard itself never interprets them.
+
+    ``create=False`` is for read-only surfaces (``guard_brief``): it reads the
+    layers without seeding ``.agent-guard/``.
     """
-    ensure()
+    if create:
+        ensure()
     cfg = dict(DEFAULT_CONFIG)
     for path, is_project in ((layers.user_config_path(), False), (config_path(), True)):
         data = read_json(path)

@@ -54,7 +54,14 @@ export interface BriefInput {
   } | null;
 }
 
+/** Seed/other contract lines the brief re-injects (SPEC §5). */
 export const BRIEF_MAX_CONTRACT_LINES = 12;
+/** Owner-added constraint lines: their own ADDITIVE budget. Under one shared
+ *  cap, five owner rules silently evict seed constraints 08-12 from every
+ *  brief — the diff, retry, preflight, batching and budget rules would be traded
+ *  away for the owner's, which is the wrong trade (2026-11-10). Seeds never
+ *  evict owner rows and owner rows never evict seeds. */
+export const BRIEF_MAX_OWNER_CONSTRAINT_LINES = 6;
 export const BRIEF_MAX_DECISIONS = 3;
 export const BRIEF_MAX_CORRECTIONS = 3;
 export const BRIEF_MAX_AGENT_NOTES = 2;
@@ -102,13 +109,15 @@ function isTrustedOwnerConstraint(c: Constraint): boolean {
 }
 
 /**
- * Select the constraints that can enter the frozen 12-line brief cap.
+ * Select the constraints that can enter the brief: at most
+ * `BRIEF_MAX_OWNER_CONSTRAINT_LINES` owner/user rows, plus at most
+ * `BRIEF_MAX_CONTRACT_LINES` seed-or-other rows.
  *
  * Authority is more important than append order: newest explicit owner/user
- * constraints come first, then the frozen seed contract, and only then other
- * (including agent-authored) entries. Consequently an agent entry can never
- * crowd a seed constraint out of the brief. Stable source indexes break ties
- * when the day-only `added` field is identical.
+ * constraints come first. The budgets are separate on purpose — a single
+ * shared cap let five owner rules displace seeds 08-12 from every brief, which
+ * silently drops rules the owner never chose to retire. Stable source indexes
+ * break ties when the day-only `added` field is identical.
  */
 export function selectBriefConstraints(contract: Constraint[]): Constraint[] {
   const indexed = contract.map((constraint, index) => ({ constraint, index }));
@@ -122,9 +131,27 @@ export function selectBriefConstraints(contract: Constraint[]): Constraint[] {
   const others = indexed.filter(
     ({ constraint }) => constraint.source !== "seed" && !isTrustedOwnerConstraint(constraint),
   );
-  return [...owners, ...seeds, ...others]
-    .slice(0, BRIEF_MAX_CONTRACT_LINES)
-    .map(({ constraint }) => constraint);
+  const ownerLines = owners.slice(0, BRIEF_MAX_OWNER_CONSTRAINT_LINES);
+  const seedLines = [...seeds, ...others].slice(0, BRIEF_MAX_CONTRACT_LINES);
+  return [...ownerLines, ...seedLines].map(({ constraint }) => constraint);
+}
+
+/** Rows the brief cannot inject, per authority class. */
+export interface ContractOverflow {
+  hidden: number;
+  hiddenOwners: number;
+  hiddenOthers: number;
+}
+
+/** How many constraints each budget drops. Exported so every write surface
+ *  (slash command, CLI, MCP) warns with the arithmetic the selector uses
+ *  instead of re-deriving it from a total count. */
+export function contractOverflow(contract: Constraint[]): ContractOverflow {
+  const ownerCount = contract.filter((c) => isTrustedOwnerConstraint(c)).length;
+  const otherCount = contract.length - ownerCount;
+  const hiddenOwners = Math.max(0, ownerCount - BRIEF_MAX_OWNER_CONSTRAINT_LINES);
+  const hiddenOthers = Math.max(0, otherCount - BRIEF_MAX_CONTRACT_LINES);
+  return { hidden: hiddenOwners + hiddenOthers, hiddenOwners, hiddenOthers };
 }
 
 interface SectionInfo {
@@ -258,7 +285,8 @@ function visibleJournalText(
   return visible;
 }
 
-/** Build the compact brief: owner task, contract (≤12 lines), ≤3 trusted
+/** Build the compact brief: owner task, contract (≤12 seed/other lines plus
+ *  ≤6 owner lines), ≤3 trusted
  *  decisions, ≤3 trusted corrections, ≤2 unverified corrections, ≤2 unverified
  *  agent notes, ≤2 loops, and last evidence with its trust label. Anything a
  *  cap dropped is announced with the read path.
@@ -279,7 +307,7 @@ export function buildBrief(input: BriefInput): string {
       const src = source && source !== "seed" ? ` [${source}]` : "";
       lines.push(`${truncLine(c.id, 80) || "(missing-id)"}${src}: ${truncLine(c.text)}`);
     }
-    const hidden = input.contract.length - contractLines.length;
+    const { hidden } = contractOverflow(input.contract);
     if (hidden > 0) {
       // Never silently drop owner-added constraints: announce the overflow so
       // the model knows constraints exist beyond the injected 12 (goal #1).

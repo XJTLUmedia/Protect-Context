@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+The brief is no longer extension-only, and the store travels with the repo.
+
+- **One brief, three surfaces, byte-identical.** `buildBrief` moved out of
+  `index.ts` into `extension/lib/brief_source.ts`, and `protect_context.brief`
+  is its Python twin. The same store now renders through the pi extension
+  (`before_agent_start`), the new CLI verb `protect-context brief`, and the new
+  MCP tool `guard_brief` — the 14th MCP tool and the 14th pi tool. A new test
+  (`tests/test_brief.py`) drives one fixture store through both runtimes and
+  requires byte equality, so a renderer changed on one side fails the suite
+  instead of drifting.
+- **`+N more owner statements` stopped undercounting.** Both intent views paged
+  at `READ_LIMIT_MAX` (20), and the brief assembled from that page while passing
+  `journal.length` — so the overflow line reported the page's remainder. The
+  classifier is now reachable uncapped (`intentClassified` /
+  `intent_classified`) and the brief counts every hidden row.
+- **The whole store is tracked by default in this repo.** `.gitignore` keeps
+  only `.agent-guard/*.lock`; contract, config, state, journal, events and
+  verify runs are committed, because they record what the owner asked for and
+  what was proved. README documents the trade-off (events and journal carry the
+  working conversation) and the contract-only alternative.
+- **Owner constraints no longer evict seeds.** The brief re-injected one shared
+  12-line contract budget and selected owner rows first, so adding owner
+  constraints silently removed seeds `08`–`12` from every brief. Budgets are now
+  additive (≤6 owner + ≤12 seed/other) in both runtimes, with a
+  `contractOverflow` helper feeding every write surface's warning, and
+  `docs/PROJECT-INTENT.md` records the mission, the 12 failure modes, the ask
+  history and the honest limits.
+
 ## 3.3.1
 
 - Version 3.3.1 in every artifact (`package.json`, `package-lock.json` in both places npm records it, `pyproject.toml`, `__init__.py`, `server.json`, `bin/pc.mjs`, `CHANGELOG.md`) so npm, PyPI, and the MCP Registry publish this tree. npm 3.3.0 was published before the notes below landed. PyPI is still 3.2.1. The MCP Registry is still 3.2.1.
@@ -42,8 +72,8 @@ instead of asserted.
   the environment, or read the contract. `guard_evidence`, `guard_loop_check`,
   `guard_diff_audit`, `guard_preflight`, `guard_budget`, `guard_contract` and
   `guard_orientation` are now registered too, and both suites pin the parity
-  (`tests/test_mcp.py` for the 13 MCP names, `index-lifecycle.test.ts` for those
-  13 plus the extension-only `guard_contract_check`).
+  (`tests/test_mcp.py` for the 14 MCP names, `index-lifecycle.test.ts` for those
+  14 plus the extension-only `guard_contract_check`).
 - One version for every artifact (`package.json`, `package-lock.json` in both
   places npm records it, `pyproject.toml`, `__init__.py`, `server.json`,
   `bin/pc.mjs`, `CHANGELOG.md`), enforced by

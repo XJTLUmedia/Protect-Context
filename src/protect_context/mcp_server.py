@@ -32,6 +32,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from . import (
+    brief,
     budget,
     contract,
     diffscope,
@@ -264,7 +265,7 @@ def guard_contract(
         if c is None:
             return (f"contract: identical constraint already present ({len(cons)} total)\n"
                     "Nudge: reuse the existing constraint instead of duplicating it.")
-        warn = contract.brief_cap_warning(len(cons))
+        warn = contract.brief_cap_warning(cons)
         truncated = (
             f"note: text truncated {len(str(text))} -> {len(c['text'])} chars (TEXT_CAP {contract.MAX_TEXT})"
             if len(str(text)) > len(c["text"])
@@ -417,6 +418,37 @@ def guard_intent(
     """
     rows, total, counts = journal.intent_with_total(limit)
     return journal.render_intent(rows, total, counts)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def guard_brief(
+    limit: Annotated[
+        int,
+        Field(
+            description=(
+                "How many brief lines to return. Integer. Default 20. Clamped "
+                "to at least 1; the brief itself is already capped by section, "
+                "so this only bounds the view."
+            )
+        ),
+    ] = 20,
+) -> str:
+    """The compact pre-agent brief, built from this project's store.
+
+    Use it when you need the same context the pi extension re-injects before a
+    turn and no extension is running (another runtime, a script, a CI job, or a
+    plain MCP client): the owner task, the contract with both additive budgets
+    (owner rows, then seed rows), the newest owner statements, durable
+    precedents, trusted decisions and corrections, unverified agent notes, tag-
+    matched recall, open loops, and the last verify run with its trust label.
+    Anything a cap dropped is announced with a `+N more …` line naming the read
+    path, so the brief never silently omits context. Every line is rendered by
+    the same functions the extension uses (`protect_context.brief`), so the two
+    runtimes cannot drift. It returns the brief as one newline-separated
+    string. `limit` is an int, default 20. Side effects: none — it does not
+    create `.agent-guard/`, does not append, and does not change state.
+    """
+    return brief.render(brief.compose_brief(), limit)
 
 
 @mcp.tool(annotations=_READ_ONLY)

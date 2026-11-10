@@ -182,6 +182,7 @@ CLI verbs (mirror MCP tools; exit 0 ok / 1 warning triggered / 2 error):
 | `guard_loop_check` | — | failing-command streaks + advice |
 | `guard_diff_audit` | `baseline: str = null` | numstat vs HEAD/baseline, verdict vs thresholds |
 | `guard_preflight` | — | tool presence/versions, git-repo check |
+| `guard_brief` | — | the injected brief itself, rendered from the store (Python parity with `buildBrief`) |
 | `guard_budget` | — | session tool-output chars, est. tokens, top-5 tools |
 | `guard_journal` | `type?: "decision"\|"correction"\|"risk"\|"note", limit: int = 5` | recent journal rows, newest last, bounded; ends with a Nudge |
 | `guard_intent` | `limit: int = 5` | owner wants/needs/preferences/constraints/corrections/statements, provenance-labelled, no query |
@@ -302,7 +303,7 @@ Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi impor
 Event behaviors (all thresholds from config):
 
 - `session_start`: ensure store; new session id; record git HEAD (null if no repo); load config/contract/journal; render widget.
-- `before_agent_start`: build compact brief (`task:` line ≤400 chars, contract ≤12 lines, 2 owner statements carrying an `owner-*` intent tag or detected owner intent — an agent-tagged row is marked unverified — 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified corrections, 2 unverified model notes, open loops ≤2, last evidence with its trust label, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
+- `before_agent_start`: build compact brief via `extension/lib/brief_source.ts` (the Python twin `protect_context.brief.compose_brief` is what `guard_brief` returns; `tests/test_brief.py` pins byte equality). Shape: `task:` line ≤400 chars, contract ≤12 seed/other lines plus ≤6 owner lines, 2 owner statements carrying an `owner-*` intent tag or detected owner intent — an agent-tagged row is marked unverified — 3 most-recent trusted decisions, 3 trusted corrections, 2 unverified corrections, 2 unverified model notes, open loops ≤2, last evidence with its trust label, plus a read-path line when caps hid or truncated entries) → if `brief_mode=="changed"` and sha1(brief)==`brief_digest`, skip; else inject `{customType:"guard-brief", content, display:false}`, save the digest, and clear any pending mid-run re-injection.
 - `context`: only while a mid-run re-injection is pending (armed by `session_compact`) — if the conversation holds no persisted `guard-brief` message, append `{role:"custom", customType:"guard-brief", content, display:false}` to `event.messages`. The result is per-request, so it is re-applied on each request until a persisted block is seen; with no pending flag the handler is an O(1) no-op.
 - `input`: capture the first substantive owner prompt (≥20 chars, not a slash command) as `state.task` (source `prompt`) and invalidate the brief digest, so `task:` is re-injected on that same turn. An intent-bearing prompt (wants, needs, preferences, an explicit "you are wrong") is also appended to the journal as a TRUSTED row — the owner typed those words, so it carries no `agent` tag — with the detected `owner-*` tags and type `correction` when a correction was detected, `note` otherwise; the same text is not captured twice. `/guard-task` writes source `owner` and always wins; short follow-ups ("continue") never replace a task.
 - `tool_call` (bash only): (a) risk patterns → `ctx.hasUI && risk_confirm` → single `ctx.ui.confirm("Risky command", …)`; no-UI → log only, never block; a declined confirm appends `tool_call` (`cmd`, `ok=false`); (b) loop check: prior failed attempts for fingerprint ≥ `loop_block_after - 1` → append `tool_call` (`cmd`, `ok=false`) and return `{block:true, reason:"guard: '<cmd>' already failed N times this session — do not re-run unchanged; change approach or read the error. (Raise loop_block_after in .agent-guard/config.json to override.)"}`; (c) else append `tool_call` event with `cmd`.
@@ -317,7 +318,7 @@ Risk patterns (deny-confirm list): `rm -rf /`, `rm -rf ~`, `git push --force` (n
 
 Commands: `/guard-status`, `/guard-contract add|remove|list [text]`, `/guard-verify <cmd>`, `/guard-note <type> <text>`, `/guard-task [<text>|--clear]` (show/replace/clear the owner task anchor), `/guard-report` (full session summary, printed).
 
-Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_intent` (read-only; owner wants/needs/preferences/constraints/corrections, `limit` 0-20 default 5, provenance-labelled), `guard_contract_check` (deterministic checklist: 02 and 08 measured from the store, the rest keyword coverage of the supplied summary, and a `basis:` line that says which is which), `guard_status` (includes journal totals and the task anchor so the read path is discoverable), and the read-only surfaces that previously existed only over MCP (amendment 2026-11-10): `guard_evidence` (`limit` 0-20 default 5, or one `evidence_id`), `guard_loop_check`, `guard_diff_audit`, `guard_preflight`, `guard_budget`, `guard_contract` (`action` list|add|remove; a model-called write lands in the project layer only), `guard_orientation`. Parity is pinned on both sides: `tests/test_mcp.py` asserts the 13 MCP names and `extension/test/index-lifecycle.test.ts` asserts the same 13 plus the extension-only `guard_contract_check`.
+Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_intent` (read-only; owner wants/needs/preferences/constraints/corrections, `limit` 0-20 default 5, provenance-labelled), `guard_contract_check` (deterministic checklist: 02 and 08 measured from the store, the rest keyword coverage of the supplied summary, and a `basis:` line that says which is which), `guard_status` (includes journal totals and the task anchor so the read path is discoverable), and the read-only surfaces that previously existed only over MCP (amendment 2026-11-10): `guard_evidence` (`limit` 0-20 default 5, or one `evidence_id`), `guard_loop_check`, `guard_diff_audit`, `guard_preflight`, `guard_budget`, `guard_contract` (`action` list|add|remove; a model-called write lands in the project layer only), `guard_orientation`. `guard_brief` (read-only; `limit` bounds the returned lines, default 20) returns the same text `before_agent_start` injects, built by `protect_context.brief` — the Python twin of `extension/lib/brief.ts`. Parity is pinned on both sides: `tests/test_mcp.py` asserts the 14 MCP names and `extension/test/index-lifecycle.test.ts` asserts the same 14 plus the extension-only `guard_contract_check`; `tests/test_brief.py` renders one fixture store through both runtimes and requires byte equality.
 
 Constraints: **no background processes/sockets/timers from the factory** (defer to `session_start`); idempotent `session_shutdown` cleanup; guard every `ctx.ui.*` with `ctx.hasUI`; never throw from event handlers (catch → `ctx.ui.notify`).
 
@@ -371,6 +372,13 @@ container disagreed with the developer venv in three ways:
   command — the worst failure mode for a tool whose point is trustworthy
   evidence. The `--` is dropped, and a `--timeout` written after the command
   (the help already says to put it first) gets a hint instead of a mangled run.
+- **Owner constraints no longer evict seeds.** The brief re-injected one shared
+  12-line contract budget and selected owner rows first, so adding five owner
+  constraints silently removed seeds `08-keep-diffs-reviewable` …
+  `12-budget-context` from every brief — the diff, retry, preflight, batching
+  and budget rules traded away for the owner's own. The budgets are now
+  additive (≤6 owner + ≤12 seed/other), and `contract add` reports which class
+  overflowed instead of implying a single 12-line cap.
 - **Contract text cannot be shortened silently.** `contract add` cut at the
   500-char cap and reported only the new id. Because the brief re-injects the
   constraint every prompt, a lost tail changes behaviour permanently, so all
@@ -385,9 +393,11 @@ container disagreed with the developer venv in three ways:
 
 Python (pytest, in `.venv`): store roundtrip + flock; contract CRUD + defaults identical to TS (12 ids + exact texts); fingerprint + loop streaks; numstat parser + verdicts; verify runner (uses `true`/`false` shell commands); budget math; orientation digest; CLI smoke for every verb (tmp HOME-cwd fixture so `.agent-guard` is created in a temp dir); **fastmcp in-memory Client smoke over ALL 13 MCP tools**; cross-format: Python parses a TS-format events.jsonl fixture string.
 
+Cross-runtime: `tests/test_brief.py` writes one fixture store and asserts the Python brief equals the extension's byte for byte (skipped when `node` is unavailable), so a change to either renderer that is not mirrored fails the suite.
+
 TypeScript (`node --test --experimental-strip-types`, tests in `extension/test/`, lib modules stay pi-import-free): fingerprint; risk pattern list (match/non-match cases); loop streak logic; brief digest stability; widget render; numstat/shortstat parser (fixture strings); config load/merge defaults.
 
-Typecheck: `npx -y typescript@latest tsc --noEmit` on `extension/` with a minimal `tsconfig.json` (node builtin types via `@types/node` — if this proves flaky, downgrade to best-effort and record the result; do NOT add runtime deps).
+Typecheck: `npm run typecheck` (`tsc --noEmit -p extension/tsconfig.json` via the pinned `typescript` devDependency; the older `npx -y typescript@latest tsc` form now dies with TS5042/TS5112 before checking anything, so use the project script) with a minimal `tsconfig.json` (node builtin types via `@types/node` — if this proves flaky, downgrade to best-effort and record the result; do NOT add runtime deps).
 
 ## 8. Docs requirements (README.md, written in Polish phase)
 

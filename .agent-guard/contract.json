@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "constraints": [
+    {
+      "id": "01-obey-instructions",
+      "text": "Obey the owner's explicit instructions and stated constraints exactly; when instructions conflict, ask instead of guessing.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "02-evidence-before-success",
+      "text": "Never claim success without citing a fresh verification run (evidence id or pasted output) for the exact claim.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "03-stay-in-scope",
+      "text": "Change only files the stated task requires; no unrelated refactors, reformatting, or \"improvements\".",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "04-orient-first",
+      "text": "Before the first edit in an unfamiliar area, read the relevant files and conventions; never code from guesses.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "05-simplest-correct",
+      "text": "Prefer the simplest implementation satisfying stated behavior; add or update a test for every behavior change.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "06-journal-decisions",
+      "text": "Record durable decisions and constraints in the journal when made; re-read them before resuming work.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "07-log-corrections",
+      "text": "When the owner corrects behavior, log a tagged correction; check corrections before similar work.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "08-keep-diffs-reviewable",
+      "text": "Keep diffs small: split work into logical steps; treat 400+ changed lines per task as a stop-and-split signal.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "09-no-identical-retries",
+      "text": "After 2 failures of the same command, change approach or gather new information; never re-run identical failing commands.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "10-preflight-env",
+      "text": "When tools behave unexpectedly, run preflight (tool presence/versions) before blaming code.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "11-batch-operations",
+      "text": "Batch related shell operations; prefer commands that avoid per-command permission prompts.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "12-budget-context",
+      "text": "Keep tool outputs bounded (head/tail/digest); use targeted reads; avoid re-reading large files.",
+      "added": "2026-08-28",
+      "source": "seed"
+    },
+    {
+      "id": "13-take-the-whole-batch",
+      "text": "Take the whole batch: when N follow-ups are listed, do all N in one pass and never return with a subset.",
+      "added": "2026-11-10",
+      "source": "user"
+    },
+    {
+      "id": "14-prefer-the-broad-fix",
+      "text": "Prefer the broad fix: fix the defect class at every call site in both runtimes, but keep the diffs separable.",
+      "added": "2026-11-10",
+      "source": "user"
+    },
+    {
+      "id": "15-prove-it-is-used",
+      "text": "Prove it is used, not just recorded: exercise the read path end to end before claiming a loop is closed.",
+      "added": "2026-11-10",
+      "source": "user"
+    },
+    {
+      "id": "16-keep-diffs-reviewable-treat",
+      "text": "Keep diffs reviewable: treat 400+ changed lines as a stop-and-split signal, and keep releases version-only.",
+      "added": "2026-11-10",
+      "source": "user"
+    },
+    {
+      "id": "17-npm-publish-belongs-to",
+      "text": "npm publish belongs to the owner: the registry token is theirs, so never publish on their behalf.",
+      "added": "2026-11-10",
+      "source": "user"
+    }
+  ]
+}

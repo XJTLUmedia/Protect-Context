@@ -1,4 +1,10 @@
-.agent-guard/
+# The whole .agent-guard store travels with the repo (owner decision
+# 2026-11-10: "these are not tracked I think it is wrong, since everyone has a
+# preference"). contract.json, config.json, state.json, journal.jsonl,
+# events*.jsonl and verify_runs.jsonl are the record of what was asked and what
+# was proved, so a clone starts from the same intent and the same evidence.
+# Only live lock artifacts are machine state, never intent.
+.agent-guard/*.lock
 .venv/
 __pycache__/
 node_modules/

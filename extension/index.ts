@@ -63,10 +63,13 @@ import {
   shouldBlockLoop,
   type LoopInfo,
 } from "./lib/loops.ts";
+import { composeBriefFromStore } from "./lib/brief_source.ts";
 import {
   buildBrief,
   sha1Hex,
+  contractOverflow,
   BRIEF_MAX_CONTRACT_LINES,
+  BRIEF_MAX_OWNER_CONSTRAINT_LINES,
   CMD_DISPLAY_MAX,
   TASK_DISPLAY_MAX,
   truncLine,
@@ -644,48 +647,15 @@ const startTimes = new Map<
 
   /** Compose the brief from the store. Cold path: the digest gate decides
    *  re-injection, so this runs only when the text changed or after a
-   *  compaction (goal #12). */
+   *  compaction (goal #12).
+   *
+   *  The assembly itself lives in lib/brief_source.ts, because the Python side
+   *  builds the same brief from the same files and the two are parity-tested
+   *  against one fixture (tests/test_brief.py). Keeping a second copy of the
+   *  assembly here is exactly the divergence that test exists to prevent. */
   function composeBrief(ctx: ExtensionContext): string {
     refreshLoopStateIfChanged(ctx.cwd);
-    const contract = loadContract(ctx.cwd);
-    const journal = readJournal(ctx.cwd);
-    // In-memory streaks are the merged view (bash events + guard_verify
-    // outcomes) — the disk events alone would miss verify streaks.
-    const loops = openLoopsFromMap(loopState, cfg.loop_block_after, cfg.loop_reset_after_s * 1000).slice(0, 2);
-    const last = sessionEvidence(ctx.cwd).last;
-    return buildBrief({
-      task: state.task?.text ?? null,
-      contract: contract.constraints,
-      // Full lists, not a pre-slice: buildBrief owns the display caps and
-      // reports exactly how many entries those caps hid.
-      // Durable precedents (`lesson` tag) are re-shown every turn, ahead of the
-      // recent caps, so a lesson the owner already paid for cannot rotate out.
-      precedents: [...journal].reverse().filter((entry) => sanitizeTags(entry.tags).includes("lesson")),
-      precedentsCap: cfg.brief_max_precedents,
-      decisions: trustedEntries(journal, "decision"),
-      corrections: trustedEntries(journal, "correction"),
-      // Corrections the model wrote are never authority, but they are the
-      // record of what the owner corrected; show them in their own slot so
-      // they are not starved by newer ordinary notes.
-      unverifiedCorrections: recentAgentEntries(journal, journal.length).filter(
-        (entry) => entry.type === "correction",
-      ),
-      agentNotes: recentAgentEntries(journal, journal.length).filter(
-        (entry) => entry.type !== "correction",
-      ),
-      recallPool: trustedRecallPool(journal),
-      // Newest first, un-capped: buildBrief applies BRIEF_MAX_INTENT and reports
-      // how many it hid, so a capped brief never implies the list ended.
-      ownerIntent: [...intentWithTotal(journal, journal.length).rows]
-        .reverse()
-        .map(({ entry }) => ({ type: entry.type, text: entry.text, tags: entry.tags })),
-      loops,
-      // The trust label travels with the id: a masked exit 0 must not read
-      // like a clean run on the one line that anchors evidence-before-success.
-      lastEvidence: last
-        ? { id: last.id, exit: last.exit, cmd: last.cmd, ms: last.ms, label: outcomeLabel(last) }
-        : null,
-    });
+    return composeBriefFromStore(ctx.cwd, session.id, cfg);
   }
 
   /** Full guard block (orientation + brief), forced past the digest gate. Only a
@@ -1206,10 +1176,12 @@ const startTimes = new Map<
           const total = result.total;
           const where = scope === "user" ? " (personal layer — every project)" : "";
           if (ctx.hasUI) {
-            // SPEC §5 caps the re-injected brief at 12 contract lines: a
-            // constraint past the cap would be silently DROPPED while the
-            // owner believes it is enforced — warn instead.
-            const over = total > BRIEF_MAX_CONTRACT_LINES;
+            // Two budgets (2026-11-10): owner rules are additive to the seed
+            // cap, so a constraint past `owner` no longer costs a seed. The
+            // warning must name the class that actually overflowed instead of
+            // claiming a single 12-line cap that no longer exists.
+            const overflow = contractOverflow(loadContract(ctx.cwd).constraints);
+            const over = overflow.hidden > 0;
             // A silently shortened constraint is re-injected every prompt, so the
             // owner must hear about the cut, not discover it in contract.json.
             const cut = rest.length > c.text.length
@@ -1218,8 +1190,9 @@ const startTimes = new Map<
             const ack = !result.added
               ? `constraint ${c.id} already exists\nNudge: no duplicate was written.`
               : over
-              ? `added ${c.id}${where}${cut}\nwarning: ${total} constraints exceed the ${BRIEF_MAX_CONTRACT_LINES}-line brief cap — ` +
-                `only the ${BRIEF_MAX_CONTRACT_LINES} highest-priority owner/seed constraints are re-injected.` +
+              ? `added ${c.id}${where}${cut}\nwarning: ${total} constraints exceed the brief budget — ` +
+                `${overflow.hiddenOwners} owner and ${overflow.hiddenOthers} seed/other are not re-injected ` +
+                `(${BRIEF_MAX_OWNER_CONSTRAINT_LINES} owner + ${BRIEF_MAX_CONTRACT_LINES} seed/other lines).` +
                 `\nNudge: keep the contract tight — fewer, sharper constraints survive re-injection.`
               : `added ${c.id}${where}${cut}\nNudge: the brief re-injects on your next prompt.`;
             ctx.ui.notify(ack, result.added && over ? "warning" : "info");
@@ -1761,6 +1734,38 @@ const startTimes = new Map<
         (personal > 0 ? `\npersonal layer: ${personal} (applies to every project)` : "") +
         "\nNudge: cite the ids you actually satisfied; guard_contract_check measures 02 and 08 from the store.";
       return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_brief",
+    label: "Guard Brief",
+    description:
+      "The compact pre-agent brief, built from this project's store: owner task, contract (6 owner + 12 seed/other " +
+      "lines), newest owner statements, durable precedents, trusted decisions and corrections, unverified agent " +
+      "notes, tag-matched recall, open loops, and the last verify run with its trust label. Optional limit bounds " +
+      "the returned lines (default 20). The same text the extension injects before a turn.",
+    promptSnippet: "Read the brief the extension would inject, on demand",
+    promptGuidelines: [
+      "Use guard_brief to recover the injected context after a compaction or when you need the running contract in full.",
+    ],
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Integer({ description: "Maximum brief lines to return. Default 20." })),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      // Same assembler the injected brief uses: one store, one text.
+      const raw = composeBriefFromStore(ctx.cwd, session.id, cfg);
+      const limit = typeof params.limit === "number" && Number.isFinite(params.limit)
+        ? Math.max(1, Math.trunc(params.limit))
+        : 20;
+      const lines = raw === "" ? [] : raw.split("\n");
+      const shown = lines.slice(0, limit);
+      const out = [...shown];
+      if (lines.length > shown.length) {
+        out.push(`+${lines.length - shown.length} more brief lines — raise the limit`);
+      }
+      out.push("Nudge: honor the brief; guard_journal, guard_recall and guard_contract read the rest.");
+      return Promise.resolve({ content: [{ type: "text", text: out.join("\n") }], details: {} });
     },
   });
 

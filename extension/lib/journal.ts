@@ -414,16 +414,26 @@ export interface IntentRow {
  * written before this view existed are still captured. `counts` covers every
  * row, not the page, so a bounded render never lies about how much the owner
  * asked for. */
-export function intentWithTotal(
-  journal: JournalEntry[],
-  limit: number,
-): { rows: IntentRow[]; total: number; counts: Record<IntentKind | "owner" | "agent", number> } {
+/** Every row that expresses owner intent, oldest first, UNCAPPED.
+ *
+ * `intentWithTotal` pages the read view at READ_LIMIT_MAX; the brief needs the
+ * full length so `+N more owner statements` counts every hidden row instead of
+ * the untouched part of a 20-row page (2026-11-10 cross-runtime check). */
+export function intentClassified(journal: JournalEntry[]): IntentRow[] {
   const classified: IntentRow[] = [];
   for (const entry of journal) {
     if (entry === null || typeof entry !== "object") continue;
     const kinds = intentOf(entry);
     if (kinds.length > 0) classified.push({ entry, kinds });
   }
+  return classified;
+}
+
+export function intentWithTotal(
+  journal: JournalEntry[],
+  limit: number,
+): { rows: IntentRow[]; total: number; counts: Record<IntentKind | "owner" | "agent", number> } {
+  const classified = intentClassified(journal);
   const counted: Record<IntentKind | "owner" | "agent", number> = Object.fromEntries(
     INTENT_KINDS.map((tag) => [tag, classified.filter((row) => row.kinds.includes(tag)).length]),
   ) as Record<IntentKind | "owner" | "agent", number>;

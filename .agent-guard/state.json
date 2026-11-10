@@ -1,0 +1,115 @@
+{
+  "current_session": {
+    "id": "01a1c583-a973-725b-9c06-d6e0f28236f2",
+    "started": "2026-11-10T12:52:02.669Z",
+    "git_head": "a557fdcf1bde39e9f8733b9a9ee9c57827d37d8d"
+  },
+  "sessions": {
+    "01a1c3dd-bb61-7111-9a27-2a4a246cafd6": {
+      "started": "2026-11-10T05:10:54.073Z",
+      "git_head": "a60de9b420201047129b0cf47502fa560809d1e8",
+      "brief_digest": null,
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 800,
+        "diff_files": 10
+      },
+      "updated": "2026-11-10T06:13:23.845Z"
+    },
+    "01a1c416-d01a-713b-800a-3668852990dc": {
+      "started": "2026-11-10T06:13:15.515Z",
+      "git_head": "a60de9b420201047129b0cf47502fa560809d1e8",
+      "brief_digest": null,
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 0,
+        "diff_files": 0
+      },
+      "updated": "2026-11-10T06:13:15.515Z"
+    },
+    "01a1c30d-b209-7759-8d87-739d23356fc9": {
+      "started": "2026-11-10T01:23:57.284Z",
+      "git_head": "a60de9b420201047129b0cf47502fa560809d1e8",
+      "brief_digest": "900ff81285922941f70dfbed84b9998f83074abf",
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 800,
+        "diff_files": 10
+      },
+      "updated": "2026-11-10T05:10:18.100Z"
+    },
+    "01a1c03c-2fa1-7328-b3a9-0b2dee31cf9d": {
+      "started": "2026-11-09T12:15:52.022Z",
+      "git_head": "9e9f12416cb09f6b23639180866bcbfc4195ee15",
+      "brief_digest": "61017b33309f5bb63056aedd73fab59acfc9a588",
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 800,
+        "diff_files": 10
+      },
+      "updated": "2026-11-09T12:15:52.022Z"
+    },
+    "01a1bf24-91b4-7716-afb6-2d9006f7345b": {
+      "started": "2026-11-09T07:10:15.831Z",
+      "git_head": "215d75b378e4fc4bb86f37b9eb5084e5231f1f39",
+      "brief_digest": null,
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 0,
+        "diff_files": 0
+      },
+      "updated": "2026-11-09T07:10:15.831Z"
+    },
+    "01a1bf19-aedc-7257-b16a-4cace1f625df": {
+      "started": "2026-11-09T06:58:18.880Z",
+      "git_head": "a8cd5ae4d79e11dcf8ac065d18d52eadaa47c01a",
+      "brief_digest": "8462b5f55e59024dc7f2a15397a5d2064a7c6641",
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 0,
+        "diff_files": 0
+      },
+      "updated": "2026-11-09T06:58:18.880Z"
+    },
+    "01a1bf18-e46d-71d9-8f1e-2dd2d401b1d4": {
+      "started": "2026-11-09T06:57:45.405Z",
+      "git_head": "a8cd5ae4d79e11dcf8ac065d18d52eadaa47c01a",
+      "brief_digest": "ce2bd5c4736415c949c94cc35be451a3215b5079",
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 0,
+        "diff_files": 0
+      },
+      "updated": "2026-11-09T06:57:45.405Z"
+    },
+    "01a1c583-a973-725b-9c06-d6e0f28236f2": {
+      "started": "2026-11-10T12:52:02.669Z",
+      "git_head": "a557fdcf1bde39e9f8733b9a9ee9c57827d37d8d",
+      "brief_digest": null,
+      "notify_watermarks": {
+        "ctx_pct": 0,
+        "diff_lines": 800,
+        "diff_files": 10
+      },
+      "updated": "2026-11-10T12:52:02.669Z"
+    }
+  },
+  "counters": {},
+  "task": {
+    "text": ".agent-guard/config.json, state.json no thresholds, session state, task anchor .agent-guard/journal.jsonl, events*.jsonl, verify_runs.jsonl no conversation content, tool traffic, evidence these are not tracked I think it is wrong, since everyone has a preference. The brief is built only by the pi extension (extension/lib/brief.ts). There is no Python brief builder, so the CLI and MCP surfaces can…",
+    "source": "prompt",
+    "ts": "2026-11-10T13:45:28.335Z",
+    "session": "01a1c583-a973-725b-9c06-d6e0f28236f2",
+    "files": [
+      "/home/futuresight/python-projects/protect-context/src/protect_context/brief.py",
+      "/home/futuresight/python-projects/protect-context/extension/lib/brief_source.ts",
+      "/tmp/compose-brief.patch.ts",
+      "/home/futuresight/python-projects/protect-context/src/protect_context/cli.py",
+      "/home/futuresight/python-projects/protect-context/src/protect_context/mcp_server.py",
+      "/home/futuresight/python-projects/protect-context/tests/test_brief.py",
+      "/home/futuresight/python-projects/protect-context/extension/index.ts",
+      "/home/futuresight/python-projects/protect-context/.gitignore",
+      "/home/futuresight/python-projects/protect-context/README.md"
+    ]
+  }
+}

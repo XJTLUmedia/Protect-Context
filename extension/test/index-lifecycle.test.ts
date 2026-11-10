@@ -443,12 +443,13 @@ test("index lifecycle: a file edit records how big the change was and where", as
   }
 });
 
-// The MCP server exposes 13 tools; the extension used to expose 7, so an agent
+// The MCP server exposes 14 tools; the extension used to expose 7, so an agent
 // running under the extension alone could not look up evidence, see why a re-run
 // blocked, audit its diff, check the environment, or read its own contract
 // (2026-11-10 audit finding). This test is the parity contract.
-// The 13 names tests/test_mcp.py pins on the Python side.
+// The 14 names tests/test_mcp.py pins on the Python side.
 const MCP_TOOLS = [
+  "guard_brief",
   "guard_budget",
   "guard_contract",
   "guard_diff_audit",
@@ -500,6 +501,10 @@ test("index lifecycle: the extension exposes every read-only guard surface, and 
     assert.match(await call("guard_diff_audit"), /^PC diff · vs HEAD/);
     assert.match(await call("guard_budget"), /^PC budget · session session-tools$/m);
     assert.match(await call("guard_orientation"), /^PC orientation/);
+    // The brief is now readable from the extension too: same store, same text
+    // it injects before a turn (tests/test_brief.py pins Python/TS equality).
+    assert.match(await call("guard_brief"), /^contract:$/m);
+    assert.match(await call("guard_brief", { limit: 2 }), /more brief lines/);
     // FakePi answers every `--version` with `<tool> version 9.9.9`.
     const preflight = await call("guard_preflight");
     assert.match(preflight, /^PC preflight · git repo: yes$/m);

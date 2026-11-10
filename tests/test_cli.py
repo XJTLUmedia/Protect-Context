@@ -336,15 +336,25 @@ def test_orientation_read_surface(capsys):
     assert out.rstrip().splitlines()[-1].startswith("Nudge:")
 
 
-# ---- contract add: brief-cap warning -----------------------------------------
+# ---- contract add: brief-budget warning --------------------------------------
 
-def test_contract_add_warns_past_brief_cap(capsys):
-    """The 13th constraint exceeds the frozen cap: the ack must disclose
-    provenance-aware selection rather than claim append-order truncation."""
+def test_contract_add_is_quiet_while_the_owner_budget_holds(capsys):
+    """A 13th constraint used to evict a seed. Owner rows now have their own
+    additive budget, so the ack must stay quiet until THAT budget overflows."""
     assert main(["contract", "add", "Keep PRs under 300 lines"]) == 0
     out = capsys.readouterr().out
-    assert "highest-priority owner/seed" in out
-    assert "Nudge:" in out
+    assert "exceed the brief budget" not in out
+    assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_contract_add_warns_once_the_owner_budget_overflows(capsys):
+    """The 7th owner row is real overflow: the ack must name the class that was
+    dropped instead of implying a single 12-line cap."""
+    for i in range(7):
+        assert main(["contract", "add", f"Owner rule number {i}"]) == 0
+    out = capsys.readouterr().out
+    assert "1 owner and 0 seed/other" in out
+    assert "6 owner + 12 seed/other" in out
     assert out.rstrip().splitlines()[-1].startswith("Nudge:")
 
 

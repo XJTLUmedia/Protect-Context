@@ -75,6 +75,7 @@ def test_seed_entry_shape_is_deterministic():
 
 def test_add_assigns_sequential_slug_id_and_persists():
     c, cons = contract.add("Always run pytest before committing")
+    assert c is not None
     assert c["id"].startswith("13-")
     assert cons[-1]["id"] == c["id"]
     assert c["source"] == "user"
@@ -118,13 +119,14 @@ def test_add_blank_text_is_rejected_without_mutation():
 
 def test_add_normalises_controls_and_multiline_text_before_storage():
     added, _ = contract.add("  Keep\nwords\x00apart\u202e safely  ")
-
+    assert added is not None
     assert added["text"] == "Keep words apart safely"
     assert contract.load()[-1]["text"] == "Keep words apart safely"
 
 
 def test_remove_by_id():
     c, _ = contract.add("Another constraint here")
+    assert c is not None
     assert contract.remove(c["id"]) is True
     assert all(x["id"] != c["id"] for x in contract.load())
     assert contract.remove("zzz-not-there") is False
@@ -151,6 +153,7 @@ def test_render_defensively_normalises_legacy_ids_and_text():
 def test_add_caps_text_length():
     """Constraint text is capped (parity with the extension): briefs re-inject it."""
     c, _ = contract.add("x" * 900)
+    assert c is not None
     assert len(c["text"]) == 500
 
 
@@ -199,12 +202,43 @@ def test_mixed_contract_keeps_valid_rows_and_skips_malformed_rows():
     ]
 
 
-def test_brief_cap_warning_fires_only_past_12():
-    """SPEC §5 freezes the brief at 12 contract lines; the warning tells the
-    truth about constraints beyond it."""
-    assert contract.brief_cap_warning(12) == ""
-    warn = contract.brief_cap_warning(13)
-    assert "highest-priority owner/seed" in warn and "12" in warn
+def test_brief_cap_warning_counts_each_budget_separately():
+    """SPEC §5 gives owner rows their own additive budget: five owner
+    constraints must not cost a seed, so they must not warn either."""
+    seeds = [dict(c) for c in DEFAULT_CONTRACT]
+    owners = [
+        {
+            "id": f"{30 + i}-owner-{i}",
+            "text": f"owner rule {i}",
+            "added": "2026-09-05",
+            "source": "user",
+        }
+        for i in range(5)
+    ]
+    assert contract.brief_cap_warning(seeds) == ""
+    assert contract.brief_cap_warning(seeds + owners) == ""
+
+    # Two more owner rows overflow the OWNER budget only.
+    seven = owners + [
+        {"id": "40-owner-5", "text": "owner rule 5", "added": "2026-09-06", "source": "owner"},
+        {"id": "41-owner-6", "text": "owner rule 6", "added": "2026-09-07", "source": "owner"},
+    ]
+    warn = contract.brief_cap_warning(seeds + seven)
+    assert "1 owner and 0 seed/other" in warn
+    assert "6 owner + 12 seed/other" in warn
+
+    # Agent entries share the seed budget, so they overflow THAT one.
+    agent = [
+        {
+            "id": f"{50 + i}-agent-{i}",
+            "text": f"agent rule {i}",
+            "added": "2026-09-08",
+            "source": "agent",
+        }
+        for i in range(2)
+    ]
+    warn = contract.brief_cap_warning(seeds + agent)
+    assert "0 owner and 2 seed/other" in warn
 
 
 def test_render_is_bounded_but_keeps_seeds_and_newest_entries():

@@ -13,6 +13,7 @@ fastmcp = pytest.importorskip("fastmcp")
 
 EXPECTED_TOOLS = {
     "guard_status",
+    "guard_brief",
     "guard_verify",
     "guard_evidence",
     "guard_contract",
@@ -28,6 +29,7 @@ EXPECTED_TOOLS = {
 }
 
 READ_ONLY_TOOLS = {
+    "guard_brief",
     "guard_evidence",
     "guard_journal",
     "guard_intent",
@@ -77,6 +79,8 @@ def test_all_tools_smoke():
                 "guard_journal", {"limit": 5, "type": "correction"}))
             results["intent"] = _text(await client.call_tool(
                 "guard_intent", {"limit": 5}))
+            results["brief"] = _text(await client.call_tool(
+                "guard_brief", {"limit": 20}))
             results["recall"] = _text(await client.call_tool(
                 "guard_recall", {"query": "rg", "tags": ["search"], "limit": 5}))
             results["loop_check"] = _text(await client.call_tool("guard_loop_check", {}))

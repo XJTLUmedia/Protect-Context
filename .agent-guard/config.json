@@ -1,0 +1,18 @@
+{
+  "loop_block_after": 3,
+  "diff_warn_lines": 400,
+  "diff_hard_lines": 800,
+  "diff_warn_files": 10,
+  "ctx_warn_pct": 70,
+  "brief_mode": "changed",
+  "risk_confirm": true,
+  "preflight_tools": [
+    "git",
+    "python3",
+    "pip",
+    "node",
+    "npm",
+    "rg",
+    "pytest"
+  ]
+}

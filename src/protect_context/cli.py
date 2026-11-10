@@ -15,6 +15,7 @@ import subprocess
 from rich.console import Console
 
 from . import (
+    brief,
     budget,
     contract,
     diffscope,
@@ -188,7 +189,7 @@ def cmd_contract(args: argparse.Namespace) -> int:
                 f"(TEXT_CAP {contract.MAX_TEXT})"
             )
         _emit(contract.render(cons))
-        warn = contract.brief_cap_warning(len(cons))
+        warn = contract.brief_cap_warning(cons)
         if warn:
             _emit(warn)
         _emit("Nudge: keep the contract tight — fewer, sharper constraints survive re-injection.")
@@ -240,6 +241,12 @@ def cmd_journal(args: argparse.Namespace) -> int:
 def cmd_intent(args: argparse.Namespace) -> int:
     rows, total, counts = journal.intent_with_total(args.limit)
     _emit(journal.render_intent(rows, total, counts))
+    return 0
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    """The same brief the pi extension injects, built from the same store."""
+    _emit(brief.render(brief.compose_brief(), args.limit))
     return 0
 
 
@@ -381,6 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--limit", type=int, default=journal.READ_LIMIT_DEFAULT)
     sp.set_defaults(func=cmd_intent)
+
+    sp = sub.add_parser(
+        "brief",
+        help="the compact pre-agent brief, rendered from this project's store",
+    )
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(func=cmd_brief)
 
     sp = sub.add_parser(
         "recall",

@@ -14,11 +14,14 @@ from .defaults import DEFAULT_CONTRACT
 
 MAX_SLUG = 40
 MAX_TEXT = 500  # free-text cap (parity with the extension): briefs re-inject it
-# SPEC §5: the extension's re-injected brief carries at most 12 contract
-# lines. The extension selects owner constraints before seeds and never lets
-# agent-authored entries displace seeds; surfaces that exceed the cap must
-# disclose that only the highest-priority subset is re-injected.
+# SPEC §5: the extension's re-injected brief carries at most 12 seed/other
+# contract lines, plus at most 6 owner/user lines on their own additive budget.
+# The split exists because one shared cap let five owner rules evict seeds
+# 08-12 from every brief; neither class may now starve the other. Surfaces that
+# exceed a budget must disclose which class is not re-injected.
 BRIEF_MAX_CONTRACT_LINES = 12
+BRIEF_MAX_OWNER_CONSTRAINT_LINES = 6
+OWNER_SOURCES = frozenset(("owner", "user"))
 RENDER_ID_MAX = 80
 RENDER_MAX_CONSTRAINTS = 24
 
@@ -43,15 +46,24 @@ def _normalise_text(value: object, cap: int) -> str:
     return " ".join(without_controls.split())[:cap].strip()
 
 
-def brief_cap_warning(total: int) -> str:
-    """Warning line for constraints that cannot enter the extension's brief
-    (empty string when the contract fits the cap)."""
-    if total <= BRIEF_MAX_CONTRACT_LINES:
+def brief_cap_warning(constraints: list[dict]) -> str:
+    """Warning line for constraints the brief cannot re-inject (empty string
+    when every row fits its budget).
+
+    Mirrors the extension's ``contractOverflow``: owner/user rows have their own
+    additive budget, so the warning names the class that actually overflowed
+    instead of implying a single 12-line cap.
+    """
+    owners = sum(1 for c in constraints if c.get("source") in OWNER_SOURCES)
+    hidden_owners = max(0, owners - BRIEF_MAX_OWNER_CONSTRAINT_LINES)
+    hidden_others = max(0, len(constraints) - owners - BRIEF_MAX_CONTRACT_LINES)
+    if hidden_owners == 0 and hidden_others == 0:
         return ""
     return (
-        f"warning: {total} constraints exceed the {BRIEF_MAX_CONTRACT_LINES}-line brief cap — "
-        f"only the {BRIEF_MAX_CONTRACT_LINES} highest-priority owner/seed constraints are "
-        "re-injected by the pi brief; review the complete contract explicitly."
+        f"warning: {len(constraints)} constraints exceed the brief budget — "
+        f"{hidden_owners} owner and {hidden_others} seed/other are not re-injected "
+        f"({BRIEF_MAX_OWNER_CONSTRAINT_LINES} owner + {BRIEF_MAX_CONTRACT_LINES} "
+        "seed/other lines); review the complete contract explicitly."
     )
 
 
@@ -155,6 +167,16 @@ def _load_for_mutation_unlocked() -> list[dict]:
             "contract contains malformed rows; repair .agent-guard/contract.json before mutating it"
         )
     return [dict(row) for row in raw]
+
+
+def load_readonly() -> list[dict]:
+    """Effective contract for a read surface: never seeds and never repairs.
+
+    ``load()`` seeds a missing store, which is right for an initialising surface
+    and wrong for a tool annotated read-only: ``guard_brief`` must not create
+    ``.agent-guard/`` behind the caller's back (SPEC §7).
+    """
+    return merged(_project_rows_readonly())
 
 
 def load() -> list[dict]:
