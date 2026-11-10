@@ -40,7 +40,7 @@ It exits 0 when the third identical `guard_verify("false")` is blocked and a mas
 - Keep MCP tool behavior the same when you only edit descriptions. `tests/test_mcp.py` covers the annotations and the description text the directories score.
 - If you change the version, set the same value in `pyproject.toml`, `package.json` (and the matching `package-lock.json` entries for this package), `server.json` (top level and the PyPI package entry), and `src/protect_context/__init__.py`.
 - Leave the `mcp-name: io.github.XJTLUmedia/protect-context` marker in `README.md`. The MCP Registry reads it from the package description.
-- Do not commit `.agent-guard/`, `.venv/`, or `node_modules/`.
-- Do not add a secret, a token, or a real home-directory path from your machine.
+- The `.agent-guard/` store is tracked on purpose (owner decision, 2026-11-10; see the comment in `.gitignore`): `contract.json`, `config.json`, `state.json`, `journal.jsonl`, `events*.jsonl` and `verify_runs.jsonl` are the record of what was asked and what was proved, so review them in a diff instead of ignoring them. `.agent-guard/*.lock`, `.venv/` and `node_modules/` stay untracked.
+- Because the store is tracked, the commands it records are published with it, and those commands contain absolute paths from the machine that ran them. Keep no secret or token in a recorded command, and treat a path that reveals a real home directory as accepted, not accidental, when you commit the store.
 
 `.github/workflows/publish-mcp.yml` publishes `server.json` to the MCP Registry on a release. It does not publish the npm or PyPI packages.
