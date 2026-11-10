@@ -1,6 +1,20 @@
 """Fingerprint-driven loop streaks + cross-format TS events fixture (SPEC §7)."""
 
+from datetime import datetime, timezone
+
 from protect_context import loops, store, verify
+
+# The events fixture pins 2026-08-28T10:00:00Z. Loop streaks expire after an
+# idle window, so a blocking assertion must name the instant it means instead of
+# racing the wall clock.
+FIXTURE_TS = "2026-08-28T10:00:00Z"
+FRESH = datetime(2026, 8, 28, 10, 0, 5, tzinfo=timezone.utc).timestamp()
+STALE = datetime(2026, 8, 28, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+
+def _cmd_count(rows):
+    """(cmd, count) projection for rows whose timestamp is produced at runtime."""
+    return [(row["cmd"], row["count"]) for row in rows]
 
 
 def _fail(cmd, session="test-session"):
@@ -15,19 +29,19 @@ def _ok(cmd=None, tool="bash", session="test-session"):
 
 def test_streaks_count_identical_failures(write_events):
     write_events([_fail("pytest -q"), _fail("pytest -q"), _ok("ls")])
-    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2}]
+    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2, "last_ts": FIXTURE_TS}]
 
 
 def test_success_of_same_command_resets_streak(write_events):
     write_events([_fail("npm test"), _fail("npm test"), _ok("npm test"), _fail("npm test")])
-    assert loops.streaks() == [{"cmd": "npm test", "count": 1}]
+    assert loops.streaks() == [{"cmd": "npm test", "count": 1, "last_ts": "2026-08-28T10:00:00Z"}]
 
 
 def test_failing_other_command_does_not_reset(write_events):
     write_events([_fail("pytest -q"), _fail("other-cmd"), _fail("pytest -q")])
     assert loops.streaks() == [
-        {"cmd": "pytest -q", "count": 2},
-        {"cmd": "other-cmd", "count": 1},
+        {"cmd": "pytest -q", "count": 2, "last_ts": "2026-08-28T10:00:00Z"},
+        {"cmd": "other-cmd", "count": 1, "last_ts": "2026-08-28T10:00:00Z"},
     ]
 
 
@@ -35,7 +49,7 @@ def test_other_session_ignored(write_events):
     write_events([_fail("pytest -q", session="someone-else"),
                   _fail("pytest -q", session="someone-else")])
     assert loops.streaks() == []
-    assert loops.streaks(session="someone-else") == [{"cmd": "pytest -q", "count": 2}]
+    assert loops.streaks(session="someone-else") == [{"cmd": "pytest -q", "count": 2, "last_ts": "2026-08-28T10:00:00Z"}]
 
 
 def test_would_block_uses_loop_block_after(write_events):
@@ -45,9 +59,9 @@ def test_would_block_uses_loop_block_after(write_events):
     assert loops.would_block(s, cfg) == []  # 1 failure < 3-1
     write_events([_fail("pytest -q"), _fail("pytest -q")])
     s = loops.streaks()
-    assert loops.would_block(s, cfg) == s  # 2 prior failures → 3rd identical blocked
-    assert loops.command_block("  pytest   -q ", cfg, s) == s[0]
-    assert loops.command_block("pytest -x", cfg, s) is None
+    assert loops.would_block(s, cfg, now=FRESH) == s  # 2 prior failures → 3rd blocked
+    assert loops.command_block("  pytest   -q ", cfg, s, now=FRESH) == s[0]
+    assert loops.command_block("pytest -x", cfg, s, now=FRESH) is None
 
 
 def test_verify_outcomes_feed_streaks():
@@ -58,7 +72,10 @@ def test_verify_outcomes_feed_streaks():
     verify.run_verify("false")
     verify.run_verify("false")
     verify.run_verify("true")  # different fingerprint — must not reset 'false'
-    assert loops.streaks() == [{"cmd": "false", "count": 2}]
+    rows = loops.streaks()
+    # verify.run_verify stamps the real clock, so assert the shape, not the instant.
+    assert _cmd_count(rows) == [("false", 2)]
+    assert rows[0]["last_ts"] != ""
 
 
 def test_mirrored_verify_events_never_double_count(write_events):
@@ -83,7 +100,10 @@ def test_mirrored_verify_events_never_double_count(write_events):
             "ms": 1,
         },
     )
-    assert loops.streaks() == [{"cmd": "pytest -q", "count": 1}]
+    rows = loops.streaks()
+    # The ledger row above carries the real clock, so compare the shape.
+    assert _cmd_count(rows) == [("pytest -q", 1)]
+    assert rows[0]["last_ts"] != ""
 
 
 def test_verify_success_resets_streak(tmp_path):
@@ -104,7 +124,9 @@ def test_explicit_events_skip_the_ledger_merge(write_events):
 
     verify.run_verify("false")
     write_events([_fail("pytest -q")])
-    assert loops.streaks([_fail("pytest -q")]) == [{"cmd": "pytest -q", "count": 1}]
+    assert loops.streaks([_fail("pytest -q")]) == [
+        {"cmd": "pytest -q", "count": 1, "last_ts": ""}
+    ]
 
 
 def test_render_has_nudge(write_events):
@@ -117,9 +139,9 @@ def test_render_has_nudge(write_events):
 
 def test_trailing_semicolon_shares_a_streak(write_events):
     write_events([_fail("pytest -q"), _fail("pytest -q;")])
-    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2}]
+    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2, "last_ts": FIXTURE_TS}]
     cfg = store.load_config()
-    blocked = loops.command_block("pytest -q;", cfg)
+    blocked = loops.command_block("pytest -q;", cfg, now=FRESH)
     assert blocked is not None and blocked["count"] == 2
 
 
@@ -136,9 +158,9 @@ def test_masked_success_does_not_reset_and_matches_the_underlying_command(write_
     ])
     # A masked exit 0 is an unproven attempt, not a success: it counts too, so
     # `|| true` cannot walk a command back under the block threshold.
-    assert loops.streaks() == [{"cmd": "npm test", "count": 3}]
+    assert loops.streaks() == [{"cmd": "npm test", "count": 3, "last_ts": "2026-08-28T10:00:00Z"}]
     cfg = store.load_config()
-    blocked = loops.command_block("npm test || true", cfg)
+    blocked = loops.command_block("npm test || true", cfg, now=FRESH)
     assert blocked is not None and blocked["cmd"] == "npm test"
     # A real success of the same command still clears the streak.
     write_events([_fail("npm test"), _fail("npm test"), _ok("npm test")])
@@ -149,12 +171,12 @@ def test_whitespace_variants_share_one_fingerprint(write_events):
     # cmd is stored fingerprint-normalized (SPEC §2); if un-normalized data
     # sneaks in, streaks still collapse whitespace variants together.
     write_events([_fail("pytest  -q"), _fail("pytest\t-q")])
-    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2}]
+    assert loops.streaks() == [{"cmd": "pytest -q", "count": 2, "last_ts": FIXTURE_TS}]
 
 
 def test_malformed_command_fields_are_ignored():
     events = [_fail("pytest -q"), _fail(7), _ok(cmd={"not": "a command"})]
-    assert loops.streaks(events) == [{"cmd": "pytest -q", "count": 1}]
+    assert loops.streaks(events) == [{"cmd": "pytest -q", "count": 1, "last_ts": ""}]
 
 
 def test_cross_format_parses_ts_extension_events_fixture():
@@ -177,7 +199,9 @@ def test_cross_format_parses_ts_extension_events_fixture():
     assert len(events) == 5
     assert events[0]["kind"] == "tool_call" and events[0]["ok"] is None
     # streak for ext-1 only; ext-2 is a different session
-    assert loops.streaks(events, session="ext-1") == [{"cmd": "npm test", "count": 2}]
+    assert loops.streaks(events, session="ext-1") == [
+        {"cmd": "npm test", "count": 2, "last_ts": "2026-08-28T10:02:00Z"}
+    ]
     # budget math over the same TS fixture: only tool_result out_chars count
     from protect_context import budget
 
@@ -235,3 +259,47 @@ def test_piped_verify_runs_count_as_unproven_attempts():
     streak = loops.streaks()
     assert streak and streak[0]["count"] == 3, streak
     assert loops.command_block("true | tail -1", store.load_config()) is not None
+
+
+def test_a_stale_streak_stops_blocking_after_the_reset_window(write_events):
+    """circuit-breaker HALF_OPEN: an idle streak earns a probe, not a wall.
+
+    A failure from two hours ago says little about the code as it is now, so the
+    next identical run is allowed — and if it fails again the streak is still
+    counted, so the brake closes on the very next attempt.
+    """
+    write_events([_fail("pytest -q"), _fail("pytest -q")])
+    cfg = store.load_config()
+    streak = loops.streaks()
+    assert loops.would_block(streak, cfg, now=FRESH) == streak  # fresh → blocked
+    assert loops.would_block(streak, cfg, now=STALE) == []       # aged out → probe
+    assert loops.command_block("pytest -q", cfg, streak, now=STALE) is None
+
+
+def test_loop_reset_after_zero_never_expires(write_events):
+    """An owner who sets 0 wants the old behaviour: blocked until a success."""
+    write_events([_fail("pytest -q"), _fail("pytest -q")])
+    cfg = dict(store.load_config(), loop_reset_after_s=0)
+    streak = loops.streaks()
+    assert loops.would_block(streak, cfg, now=STALE) == streak
+
+
+def test_an_unknown_timestamp_never_disarms_the_brake(write_events):
+    """A missing ts must read as 'age unknown', not as 'old enough to unblock'."""
+    streak = [{"cmd": "pytest -q", "count": 5, "last_ts": ""}]
+    cfg = store.load_config()
+    assert loops.would_block(streak, cfg, now=STALE) == streak
+
+
+def test_loop_render_reports_how_long_ago_the_last_failure_was(write_events):
+    write_events([_fail("pytest -q"), _fail("pytest -q")])
+    streak = loops.streaks()
+    cfg = store.load_config()
+    fresh = loops.render(streak, cfg, now=FRESH)
+    assert "×2" in fresh and "last " in fresh and "ago" in fresh
+    assert "next identical run will be blocked" in fresh
+    # A stale streak must not claim a block it no longer enforces, and it must
+    # say plainly that the next run is a probe.
+    stale = loops.render(streak, cfg, now=STALE)
+    assert "next identical run will be blocked" not in stale
+    assert "aged past loop_reset_after_s" in stale and "probe" in stale

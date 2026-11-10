@@ -386,16 +386,18 @@ python3 examples/loop-brake-demo/demo.py
 |---|---|---|---|
 | Brief injected automatically before a turn | yes (change-triggered) | — | — |
 | Orientation digest (tree, languages, conventions) | injected once per digest | `guard_orientation` | `orientation` |
-| Verification evidence (`ev-NNNN`) | `guard_verify`, `/guard-verify` | `guard_verify` | `verify` |
-| Loop blocking | blocks the command | `guard_loop_check` reports and advises | `verify` refuses; `loops` exits 1 |
-| Scope audit | session-start baseline + warnings | `guard_diff_audit` (explicit baseline) | `diff --baseline REF` |
+| Verification evidence (`ev-NNNN`) | `guard_verify`, `guard_evidence`, `/guard-verify` | `guard_verify`, `guard_evidence` | `verify`, `evidence` |
+| Loop blocking | blocks the command; `guard_loop_check` explains why | `guard_loop_check` reports and advises | `verify` refuses; `loops` exits 1 |
+| Scope audit | session-start baseline + warnings, `guard_diff_audit` on demand | `guard_diff_audit` (explicit baseline) | `diff --baseline REF` |
 | Journal write/read | `guard_note`, `/guard-note`, `guard_journal` | `guard_note`, `guard_journal` | `note`, `journal` |
 | Recall across the retained window | `guard_recall`; brief may surface 1–2 trusted tag matches | `guard_recall` | `recall` |
-| Owner intent (wants, needs, preferences, corrections) | `guard_intent` | `guard_intent` | `intent` |
+| Owner intent (wants, needs, preferences, constraints, corrections) | `guard_intent` | `guard_intent` | `intent` |
 | Trusted re-injection of decisions | yes, after change and after every compaction (incl. mid-run) | read views only | read views only |
 | Re-injection of the agent's own notes | yes, in an explicitly unverified section | read views only | read views only |
 | Owner task anchor | `/guard-task`, auto-captured from the first prompt | — | — |
-| Contract management | `/guard-contract` | `guard_contract` | `contract list\|add\|remove` |
+| Contract management | `guard_contract`, `/guard-contract` | `guard_contract` | `contract list\|add\|remove` |
+| Environment preflight | `guard_preflight` | `guard_preflight` | `preflight` |
+| Context budget | `guard_budget` (per session) | `guard_budget` | `budget` |
 | Risky-command confirmation | one grouped confirm | host approval policy | — |
 | Status widget | yes | — | `status` |
 
@@ -423,9 +425,15 @@ Model-callable tools:
 | `guard_evidence` | `limit` (default 5), optional `evidence_id` | Read-only; the window shows each non-ok row's last output line, and `evidence_id` returns one run in full |
 | `guard_journal` | `limit` (0–20, default 5), optional `type` | Read-only; recovers decisions, corrections, and the agent's own earlier notes after a compaction |
 | `guard_recall` | `query`, `type`, `tags` (AND), `limit` (0–20, default 5), `evidence_id`, `cmd` | Read-only scan of the retained window; hits labelled `trusted` or `agent` |
-| `guard_intent` | `limit` (0–20, default 5) | Read-only owner wants, needs, preferences, and corrections; no query needed, provenance-labelled |
-| `guard_contract_check` | `summary` | Deterministic keyword coverage checklist, never a proof |
-| `guard_status` | — | Same data that feeds the widget, including journal totals |
+| `guard_intent` | `limit` (0–20, default 5) | Read-only owner wants, needs, preferences, constraints, corrections and statements; no query needed, provenance-labelled |
+| `guard_contract_check` | `summary` | Checklist where 02 (evidence cited) and 08 (diff size) are measured from the store; the rest is keyword coverage, labelled as self-report |
+| `guard_status` | — | Same data that feeds the widget, including journal totals and the task anchor |
+| `guard_loop_check` | — | Read-only failing-command streaks and whether the next identical re-run blocks |
+| `guard_diff_audit` | — | Read-only diff size against the configured warn/hard thresholds |
+| `guard_preflight` | — | Read-only tool presence and versions; a slow probe reads `(version unavailable)`, never `missing` |
+| `guard_budget` | — | Read-only per-session tool-output characters and the top 5 tools |
+| `guard_contract` | `action` (`list`\|`add`\|`remove`), `text` | A model-called write lands in the project layer only; the personal layer stays owner-only |
+| `guard_orientation` | — | Read-only bounded tree, language counts, and conventions files |
 
 ### MCP tools
 
@@ -438,7 +446,7 @@ Model-callable tools:
 | `guard_note` | local append | Journal an entry (tagged `agent`) |
 | `guard_journal` | read-only | Recent journal entries, optionally filtered by type |
 | `guard_recall` | read-only | Search the retained journal and evidence window by keyword, tag, type, evidence id, or command |
-| `guard_intent` | read-only | Owner wants, needs, preferences, and corrections from the journal (no query) |
+| `guard_intent` | read-only | Owner wants, needs, preferences, constraints, corrections and statements from the journal (no query) |
 | `guard_loop_check` | local, initializing read | Failing-command streaks and advice |
 | `guard_diff_audit` | local, initializing read | Diff stats and verdict vs thresholds |
 | `guard_preflight` | local, initializing read | Tool/version and worktree check |
@@ -667,12 +675,16 @@ its own failure mode. Within the frozen 12-line constraint cap:
 3. then other entries.
 
 An agent-authored constraint therefore cannot crowd out a seed. Below the
-contract it carries up to 2 owner statements (wants, needs, preferences and
-corrections — an agent-tagged one is marked `(unverified)`), up to 3 recent
-trusted decisions, up to 3 trusted
+contract it carries up to 2 owner statements (wants, needs, preferences,
+constraints, corrections and plain statements — trusted rows first, an
+agent-tagged one is marked `(unverified)` and only fills a line the owner's own
+words did not need), up to 3 recent trusted decisions, up to 3 trusted
 corrections, up to 2 unverified corrections, up to 2 unverified agent notes,
 up to 2 open loops, and the last evidence ID with its trust label (`ok`,
-`FAIL`, `UNTRUSTED`), exit code, duration, and a truncated command. Corrections
+`FAIL`, `UNTRUSTED`), exit code, duration, and a truncated command. An owner
+statement gets 200 characters and a truncated one sets the
+`journal text truncated` line, so the operative tail of an instruction is never
+lost silently. Corrections
 the model wrote get their own unverified slot so a newer ordinary note cannot
 starve the record of what the owner corrected. When a cap
 hides journal entries, the brief points at `guard_recall`. If the owner task's
@@ -683,12 +695,17 @@ rendered digest actually changed, so a quiet turn costs nothing.
 ### Owner intent
 
 `guard_intent` (and `protect-context intent`) answers "what does the owner
-want" without a keyword query. Rows are captured two ways: a journal entry is
-tagged automatically from its text (deterministic regexes, no model call), and
-an intent-bearing prompt the owner types in the pi TUI is written straight to
-the journal with the owner's own words and **no** `agent` tag — the owner is the
-author, so that row is trusted. Journal prose written by the agent still needs
-an `owner`/`user` attribution before it counts, so the agent's own "I want to
+want" without a keyword query. Every substantive prompt the owner types is
+journaled as a trusted `owner-prompt` row, and the view counts it: a prompt that
+names a want, need, preference, standing constraint (`do not`, `never`,
+`avoid`, `must` at the start) or correction is tagged accordingly, and one that
+names none still appears as an `owner-statement` rather than vanishing. Journal
+entries are also tagged automatically from their text (deterministic regexes, no
+model call); the imperative list covers 46 verbs and tolerates a leading
+`please`/`now`/`then`/`also`, so "now audit the plugin" and "reinstall the venv"
+are read as requests. A prompt row carries **no** `agent` tag — the owner is the
+author, so it is trusted. Journal prose written by the agent still needs an
+`owner`/`user` attribution before it counts, so the agent's own "I want to
 check" is never recorded as owner intent. The view prints one line per row
 (`kind · timestamp · text [owner|agent]`) with per-kind counts and an
 `owner N · agent M` split, newest first: a page of `[agent]` lines is visibly
@@ -705,9 +722,12 @@ add a vector index.
 
 Filters combine with AND:
 
-- **keywords** — every word must occur as a case-insensitive substring of
-  journal text, a verify command, or a verify digest. A word that is itself
-  `ev-NNNN` also matches that evidence id (`ev-7` and `ev-0007` are the same id).
+- **keywords** — every word must start a word or share a stem with one, in
+  journal text, a verify command, or a verify digest. Matching is case-insensitive
+  and never mid-word (`arch` does not reach `search`), but inflections meet:
+  `retrieving` finds `retrieval`, and `decisions` finds `decision`. A word that is
+  itself `ev-NNNN` also matches that evidence id (`ev-7` and `ev-0007` are the
+  same id).
 - **`--type` / `type`** — `decision`, `correction`, `risk`, `note`, or `evidence`.
 - **`--tag` / `tags`** — every tag must be present. Matching is exact and
   case-insensitive. Evidence rows have no tags, so a tag filter excludes them.
@@ -715,9 +735,18 @@ Filters combine with AND:
 - **`--cmd` / `cmd`** — the frozen command fingerprint, or a substring of it,
   against verify runs only. Fingerprint matching stays case-sensitive.
 
-Hits are ordered by match strength (text outweighs a command, which outweighs
-a digest; an exact fingerprint outweighs a substring), then by recency. With
-no keywords and no filters, that is simply the newest retained rows. Each
+Hits are scored with BM25 (`k1 = 1.5`, `b = 0.75`): a term's contribution
+saturates, and a long row is discounted against the corpus average, so a verbose
+row can no longer outrank a precise one. Text outweighs a command, which
+outweighs a digest; an exact fingerprint outweighs a substring. Ties break on
+recency, and a bounded boost (`min(uses, 8) × 10`) rewards an entry that has
+already been reused — enough to settle a near-tie, never enough to outvote a
+better lexical match. When a query of three or more words matches nothing at the
+two-word floor, the search widens once to a single shared term and the `Nudge:`
+line says `Widened:` so weaker evidence is never presented as a full match. The
+displayed page then collapses near-duplicates (IDF-weighted cosine ≥ 0.9 with a
+rare-token veto), so five restatements of one decision cannot fill the answer.
+With no keywords and no filters, that is simply the newest retained rows. Each
 line is labelled `trusted` or `agent`. Agent hits stay unverified. `limit`
 clamps to 0–20 and defaults to 5. The command is read-only and does not create
 `.agent-guard/` when the store is absent. Rows rotated past the third segment
@@ -788,16 +817,26 @@ reusable instead of merely stored:
   cannot silently decay into an ordinary tag.
 
 Recall is paraphrase-tolerant rather than exact-string: common stopwords are
-dropped, **tags are searched as synonyms**, and hits are weighted by rarity, so
-a word that appears in every entry cannot outvote the one word that answers the
-question. "why did the owner get annoyed?" therefore reaches a lesson tagged
-`annoyed` even though the text says "prefers the broad fix" — the tag is the
-owner's own word, written once and reused forever. One tag match also satisfies
-the multi-word floor on its own; otherwise a three-or-more-word query needs two
-real matches so a single shared word cannot answer a long question.
+dropped, **tags are searched as synonyms**, and terms are weighted by rarity
+(Lucene IDF), so a word that appears in every entry cannot outvote the one word
+that answers the question. "why did the owner get annoyed?" therefore reaches a
+lesson tagged `annoyed` even though the text says "prefers the broad fix" — the
+tag is the owner's own word, written once and reused forever. One tag match also
+satisfies the multi-word floor on its own; otherwise a three-or-more-word query
+needs two real matches, and falls back to a single shared term only when that
+finds nothing (reported as `Widened:`).
 
-Matching is word-boundary aware: `old` no longer hits `threshold` or `search`,
-while a prefix still finds its own inflections (`patch` → `patches`).
+Matching is word-boundary aware and morphology-aware: `old` no longer hits
+`threshold` or `search`, `patch` still finds `patches`, and now `retrieving`
+finds `retrieval` — previously the direction only worked from the shorter form,
+so an inflected query returned nothing at all. The stemmer is a conservative
+suffix stripper rather than Porter, because Porter turns `organization` into
+`organ` and starts answering `organic`.
+
+Length no longer buys relevance: scoring is BM25, so term frequency saturates
+and each row is normalised against the corpus average. Measured on the fixtures
+in `tests/test_recall.py`, a 60-word filler row used to beat a precise 5-word
+row; it now ranks below it.
 
 When a query is given, past successful `bash` commands from `events.jsonl` join
 the hits as `command · re-run to verify · ran N× · last ok exit 0` rows at half
@@ -854,7 +893,10 @@ npm test                                     # extension unit tests (node --test
 .venv/bin/python -m build --outdir /tmp/protect-context-dist
 ```
 
-`npm run check` runs the typecheck and the extension tests together. The
+`npm run check` runs the typecheck and the extension tests together. CI
+(`.github/workflows/check.yml`) runs the same suite plus pytest on Python 3.10
+and 3.12 for every push and pull request, so a green claim no longer depends on
+the operator remembering to type the command. The
 definition-of-done checks are run twice consecutively before release. The dated
 audit records the observed counts, integration probes, and package smoke test
 instead of leaving stale numbers in this README.

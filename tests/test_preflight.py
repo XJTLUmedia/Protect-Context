@@ -62,3 +62,24 @@ def test_probe_bounded_after_kill():
 
     assert (code, text, timed_out) == (None, "", True)
     assert elapsed < 5, "the post-kill wait must be bounded"
+
+
+def test_compact_version_does_not_repeat_the_tool_or_truncate_a_path():
+    """The renderer prints "<tool> <version>", so a repeated token is noise.
+
+    Regression: preflight printed `git git 2.43.0` (the old code stripped only
+    the literal "version ") and cut pip's install path at 60 chars, hiding the
+    number inside a directory name (found 2026-11-10).
+    """
+    assert preflight._compact_version("git", "git version 2.43.0\n") == "2.43.0"
+    assert preflight._compact_version("pytest", "pytest 9.1.1\n") == "9.1.1"
+    assert (
+        preflight._compact_version(
+            "pip",
+            "pip 24.0 from /home/you/.venvs/very-long-name/lib/python3.12/site-packages/pip (python 3.12)\n",
+        )
+        == "24.0"
+    )
+    assert preflight._compact_version("node", "v26.13.0\n") == "v26.13.0"
+    # ripgrep names itself differently from the binary, so its token survives.
+    assert preflight._compact_version("rg", "ripgrep 14.1.0 (rev 4649aa9)\n") == "ripgrep 14.1.0 (rev 4649aa9)"

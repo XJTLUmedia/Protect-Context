@@ -164,6 +164,15 @@ test("journal: owner intent is detected without a query (mirrors journal.detect_
   // An agent's own plan is not owner intent, and neither is a plain result.
   assert.deepEqual(detectIntent("I want to check the ledger"), []);
   assert.deepEqual(detectIntent("ran pytest: 258 passed"), []);
+  // Naming the tag is not expressing the intent: with `\b` the tag literal
+  // "owner-want" matched (boundary between "owner" and "-want").
+  assert.deepEqual(detectIntent("tags: owner-want and owner-need"), []);
+  assert.deepEqual(detectIntent("the owner-preference tag is set"), []);
+  // A quotation is about intent, not an expression of it.
+  assert.deepEqual(detectIntent('the test text "owner wants X" is a fixture'), []);
+  assert.deepEqual(detectIntent("the fixture `owner wants X` is copy-pasted"), []);
+  // ... but quoting inside a real request keeps the request.
+  assert.deepEqual(detectIntent('fix the "flaky" test', true), ["owner-want"]);
 });
 
 test("journal: owner-authored text needs no attribution (paraphrase is captured)", () => {
@@ -177,6 +186,23 @@ test("journal: owner-authored text needs no attribution (paraphrase is captured)
   assert.deepEqual(detectIntent("I need both runtimes green", true), ["owner-need"]);
   assert.deepEqual(detectIntent("this is wrong", true), ["owner-correction"]);
   assert.deepEqual(detectIntent("unrelated bookkeeping", true), []);
+});
+
+test("journal: owner prompts open with connectives and non-code verbs", () => {
+  // These are the owner's real prompts; the first detector recognized none of
+  // them because it knew 17 verbs and required the verb at position 0.
+  assert.deepEqual(detectIntent("now audit the full plugin", true), ["owner-want"]);
+  assert.deepEqual(detectIntent("Reinstall the venv from scratch", true), ["owner-want"]);
+  assert.deepEqual(detectIntent("now reload the extension and audit", true), ["owner-want"]);
+  assert.deepEqual(detectIntent("review the retrieval path", true), ["owner-want"]);
+  // A start-anchored negation is a standing constraint, not a correction.
+  assert.deepEqual(detectIntent("never commit straight to main", true), ["owner-constraint"]);
+  assert.deepEqual(detectIntent("Do not touch the README; use the vendor folder", true), [
+    "owner-constraint",
+  ]);
+  // Owner-typed only: the same words in agent prose stay unclassified.
+  assert.deepEqual(detectIntent("never commit straight to main"), []);
+  assert.deepEqual(detectIntent("audit the full plugin"), []);
 });
 
 test("journal: a captured owner intent is tagged, and provenance survives the cap", () => {
@@ -209,7 +235,7 @@ test("journal: intent view groups counts, labels provenance and bounds the page"
   assert.equal(total, 2);
   assert.equal(counts["owner-want"], 1);
   assert.equal(counts["owner-preference"], 1);
-  assert.match(text.split("\n")[0]!, /^PC intent · 2 of 2 owner statements · want 1 · need 0 · preference 1 · correction 0 · owner 1 · agent 1$/);
+  assert.match(text.split("\n")[0]!, /^PC intent · 2 of 2 owner statements · want 1 · need 0 · preference 1 · constraint 0 · correction 0 · statement 0 · owner 1 · agent 1$/);
   assert.match(text, /\[agent\]/);
   assert.match(text, /\[owner\]/);
   // Newest first, so today's want is easier to act on than last week's.
@@ -220,4 +246,69 @@ test("journal: intent view groups counts, labels provenance and bounds the page"
   const zeroText = renderIntent(zero.rows, zero.total, zero.counts);
   assert.match(zeroText, /0 of 2 owner statements/);
   assert.match(zeroText, /raise the limit/);
+});
+
+test("journal: an owner-prompt row is always an owner statement", () => {
+  // Captured owner prompts used to be invisible here: the row was journaled
+  // trusted under `owner-prompt`, and no reader classified that tag, so the
+  // literal request never reached `intent` or the brief (audit 2026-11-10).
+  const rows = [
+    {
+      ts: "2026-01-01T00:00:00Z",
+      type: "note" as const,
+      text: "cold start on the parser",
+      tags: ["owner-prompt"],
+    },
+    {
+      ts: "2026-01-02T00:00:00Z",
+      type: "note" as const,
+      text: "now audit the full plugin",
+      tags: ["owner-want", "owner-prompt"],
+    },
+    {
+      ts: "2026-01-03T00:00:00Z",
+      type: "decision" as const,
+      text: "Owner approved the upgrade",
+      tags: ["agent"],
+    },
+    {
+      // Provenance outranks the claim: a model row cannot borrow the tag.
+      ts: "2026-01-04T00:00:00Z",
+      type: "note" as const,
+      text: "audit the plugin",
+      tags: ["owner-prompt", "agent"],
+    },
+  ];
+  const { rows: page, total, counts } = intentWithTotal(rows, 5);
+  const text = renderIntent(page, total, counts);
+
+  assert.equal(total, 3, "the prompt joins the two intent rows");
+  assert.equal(counts["owner-statement"], 1);
+  assert.equal(counts["owner-want"], 2, "the audit prompt and the agent's paraphrase");
+  assert.equal(counts.owner, 2, "both owner-typed rows are trusted");
+  assert.equal(counts.agent, 1);
+  assert.match(text, /owner-statement · 2026-01-01T00:00:00Z · cold start on the parser \[owner\]/);
+});
+
+test("journal: every entry carries a stable, citable id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-journal-id-"));
+  try {
+    // The id is the journal's ev-NNNN: without it a decision can only be
+    // referenced by recency position, which shifts as rows land.
+    const first = appendJournal(dir, { type: "decision", text: "raise the journal cap" });
+    const second = appendJournal(dir, { type: "note", text: "and give each row an id" });
+    assert.match(String(first.id), /^jn-\d{4,}$/);
+    assert.match(String(second.id), /^jn-\d{4,}$/);
+    assert.notEqual(first.id, second.id, "ids are unique");
+    assert.ok(
+      Number(second.id!.slice(3)) === Number(first.id!.slice(3)) + 1,
+      "ids increase by one per write",
+    );
+
+    // Long text survives the cap instead of being cut mid-sentence.
+    const long = appendJournal(dir, { type: "note", text: "z".repeat(1200) });
+    assert.equal(Array.from(long.text).length, 1200, "1200 chars is under the 4000 cap");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -3,6 +3,9 @@
  * Pure logic — no pi imports.
  */
 
+
+import CircuitBreaker from "opossum";
+
 import type { EventRecord } from "./events.ts";
 import { normalizeOneLine } from "./text.ts";
 import { failureMasked, loopKey, trustIssues, type VerifyRun } from "./verify.ts";
@@ -11,6 +14,8 @@ export interface LoopInfo {
   cmd: string;
   failures: number;
   lastExit: number | null;
+  /** Timestamp of the most recent failure, or null when none was recorded. */
+  lastFailedAt?: string | null;
 }
 
 interface LoopOutcome {
@@ -54,9 +59,10 @@ function applyOutcome(map: Map<string, LoopInfo>, outcome: LoopOutcome): void {
     return;
   }
   if (outcome.ok !== true && outcome.ok !== false) return;
-  const cur = map.get(cmd) ?? { cmd, failures: 0, lastExit: null };
+  const cur = map.get(cmd) ?? { cmd, failures: 0, lastExit: null, lastFailedAt: null };
   cur.failures += 1;
   if (outcome.exit !== null) cur.lastExit = outcome.exit;
+  cur.lastFailedAt = outcome.ts || null;
   map.set(cmd, cur);
 }
 
@@ -146,8 +152,43 @@ export function failedAttemptsFromLedgers(
  * The max(1, …) clamp mirrors loops.block_threshold() on the Python side:
  * loop_block_after=1 must never block a command with zero prior failures.
  */
-export function shouldBlockLoop(priorFailures: number, loopBlockAfter: number): boolean {
-  return priorFailures >= Math.max(1, loopBlockAfter - 1);
+export function loopIsStale(
+  lastFailedAt: string | null | undefined,
+  resetAfterMs: number,
+  nowMs: number = Date.now(),
+): boolean {
+  if (resetAfterMs <= 0) return false;
+  if (lastFailedAt === null || lastFailedAt === undefined || lastFailedAt === "") return false; // unknown age never disarms
+  const at = timestampMillis(lastFailedAt);
+  if (at === null) return false;
+  // opossum owns the OPEN -> HALF_OPEN transition: rebuild the breaker in the
+  // state the elapsed time implies and let it answer instead of comparing here.
+  const aged = nowMs - at > resetAfterMs;
+  const breaker = new CircuitBreaker(() => true, {
+    resetTimeout: resetAfterMs,
+    state: aged ? { closed: false, halfOpen: true } : { closed: false, open: true },
+  });
+  return breaker.halfOpen;
+}
+
+/**
+ * Block when prior failures >= loop_block_after - 1 (3rd default attempt).
+ * The max(1, …) clamp mirrors loops.block_threshold() on the Python side:
+ * loop_block_after=1 must never block a command with zero prior failures.
+ *
+ * A streak older than loop_reset_after_s is a half-open circuit (the
+ * pybreaker/opossum model): the probe is allowed, and a failure re-arms the
+ * brake because the streak itself is still counted.
+ */
+export function shouldBlockLoop(
+  priorFailures: number,
+  loopBlockAfter: number,
+  lastFailedAt: string | null | undefined = null,
+  resetAfterMs: number = 0,
+  nowMs: number = Date.now(),
+): boolean {
+  if (priorFailures < Math.max(1, loopBlockAfter - 1)) return false;
+  return !loopIsStale(lastFailedAt, resetAfterMs, nowMs);
 }
 
 /** FROZEN block reason format (SPEC §5). */
@@ -161,10 +202,17 @@ export function loopBlockReason(cmd: string, priorFailures: number): string {
 }
 
 /** Commands currently in a failing loop (would be blocked on next attempt). */
-export function openLoopsFromMap(map: Map<string, LoopInfo>, loopBlockAfter: number): LoopInfo[] {
+export function openLoopsFromMap(
+  map: Map<string, LoopInfo>,
+  loopBlockAfter: number,
+  resetAfterMs: number = 0,
+  nowMs: number = Date.now(),
+): LoopInfo[] {
   const out: LoopInfo[] = [];
   for (const info of map.values()) {
-    if (shouldBlockLoop(info.failures, loopBlockAfter)) out.push(info);
+    if (shouldBlockLoop(info.failures, loopBlockAfter, info.lastFailedAt, resetAfterMs, nowMs)) {
+      out.push(info);
+    }
   }
   out.sort((a, b) => b.failures - a.failures || a.cmd.localeCompare(b.cmd));
   return out;

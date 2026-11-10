@@ -23,9 +23,11 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
+
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 try:
     import fcntl
@@ -34,6 +36,18 @@ except ImportError:  # pragma: no cover — non-POSIX platforms
 
 from . import layers
 from .defaults import DEFAULT_CONFIG
+
+try:  # faster JSON on the hot ledger paths; stdlib stays the fallback.
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - orjson is optional at runtime
+    _orjson = None
+
+
+def _dumps_row(obj) -> str:
+    """Serialise one JSONL row compactly, preferring orjson when installed."""
+    if _orjson is not None:
+        return _orjson.dumps(obj).decode("utf-8")
+    return json.dumps(obj, ensure_ascii=False)
 
 GUARD_DIR = ".agent-guard"
 
@@ -50,8 +64,8 @@ STORE_LOCK_RETRY_S = 0.025
 # this size, keeping at most LEDGER_SEGMENTS rotated files. Readers concatenate
 # oldest-first, so "last N rows" stays correct and the newest evidence id (the
 # basis for `ev-NNNN` allocation) can never be rotated away.
-LEDGER_MAX_BYTES = 1_048_576
-LEDGER_SEGMENTS = 3
+LEDGER_MAX_BYTES = 4_194_304
+LEDGER_SEGMENTS = 6
 _LEASE_OWNER = "owner.json"
 _LEASE_REAP_MARKER = ".reap-marker"
 _LEASE_RENAME_TIMEOUT_S = 1.0
@@ -146,6 +160,22 @@ def fingerprint(cmd: str) -> str:
     return " ".join(cmd.split())
 
 
+@retry(
+    retry=retry_if_exception_type(OSError),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(0.02),
+    reraise=True,
+)
+def _replace_atomic(tmp: Path, path: Path) -> None:
+    """Move the finished temp file into place.
+
+    A rename can fail transiently (EINTR, or a reader still holding the target
+    on some filesystems); tenacity retries three times, then re-raises exactly
+    as the old single-shot replace did.
+    """
+    tmp.replace(path)
+
+
 def write_json(path: Path, data: object) -> None:
     """Atomic-enough JSON write (unique tmp + replace). A per-write tmp name
     keeps concurrent writers (threads/processes sharing the store) from
@@ -156,13 +186,11 @@ def write_json(path: Path, data: object) -> None:
         tmp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        tmp.replace(path)
+        _replace_atomic(tmp, path)
     finally:
         if tmp.exists():
-            try:
+            with suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
 
 def read_json(path: Path):
@@ -190,10 +218,8 @@ def _exclusive_flock(lf) -> Iterator[None]:
         yield
     finally:
         if locked and mod is not None:
-            try:
+            with suppress(OSError):
                 mod.flock(lf.fileno(), mod.LOCK_UN)
-            except OSError:
-                pass
 
 
 def _lease_owner(path: Path) -> dict | None:
@@ -426,10 +452,8 @@ def _break_stale_lease(path: Path, stale_s: float) -> bool:
         # Defensive fallback for filesystems with surprising rename
         # semantics. Do not delete an object whose identity changed.
         if not path.exists():
-            try:
+            with suppress(OSError):
                 _rename_lease(tomb, path)
-            except OSError:
-                pass
         return False
     return True
 
@@ -461,7 +485,7 @@ def _acquire_lease(
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"timed out acquiring store lock {path}")
+                raise TimeoutError(f"timed out acquiring store lock {path}") from None
             time.sleep(min(retry_s, remaining))
             continue
 
@@ -475,10 +499,8 @@ def _acquire_lease(
             with open(path / _LEASE_OWNER, "x", encoding="utf-8") as owner_file:
                 owner_file.write(json.dumps(owner, separators=(",", ":")) + "\n")
         except BaseException:
-            try:
+            with suppress(OSError):
                 shutil.rmtree(path)
-            except OSError:
-                pass
             raise
         return path, token
 
@@ -495,10 +517,8 @@ def _release_lease(path: Path, token: str) -> None:
     moved = _lease_snapshot(tomb)
     if moved is None or not _same_snapshot(observed, moved):
         if not path.exists():
-            try:
+            with suppress(OSError):
                 _rename_lease(tomb, path)
-            except OSError:
-                pass
         raise RuntimeError(f"store lock ownership changed before release: {path}")
     try:
         shutil.rmtree(tomb)
@@ -640,7 +660,7 @@ def _carry_pinned_rows(path: Path, carried: list[dict]) -> None:
     try:
         with open(path, "a", encoding="utf-8") as handle:
             for row in fresh:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.write(_dumps_row(row) + "\n")
     except OSError:
         # Best-effort: a lesson that cannot be carried must never break the
         # append that triggered the rotation.
@@ -697,7 +717,7 @@ def _append_unlocked(path: Path, entry: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(_dumps_row(entry) + "\n")
     except OSError as exc:
         # A ledger that cannot be appended is a real failure: surface the path
         # instead of silently losing the event.
@@ -722,6 +742,21 @@ def append_jsonl(path: Path, entry: dict) -> dict:
     with store_lock():
         _append_unlocked(path, entry)
     return entry
+
+
+def rewrite_jsonl(path: Path, rows: list[dict]) -> None:
+    """Replace a ledger's base file with `rows`, atomically and under the lock.
+
+    Used for one-shot repairs (backfilling journal ids) that must not interleave
+    with a concurrent append. Rotated segments are untouched.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with store_lock():
+        tmp = path.with_name(path.name + ".rewrite.tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(_dumps_row(row) + "\n")
+        _replace_atomic(tmp, path)
 
 
 def locked_append(path: Path, factory: Callable[[], dict]) -> dict:
@@ -793,7 +828,7 @@ def _parse_lines(text: str) -> list[dict]:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            obj = _orjson.loads(line) if _orjson is not None else json.loads(line)
         except ValueError:
             continue
         if isinstance(obj, dict):
@@ -851,8 +886,17 @@ def tail_jsonl(path: Path, count: int, *, max_bytes: int = 8_388_608) -> list[di
 
 
 def _read_text_safe(path: Path) -> str:
+    """Read a ledger segment as text, surviving damaged bytes.
+
+    Writes are atomic, but a ledger can still be damaged from outside (a
+    half-synced disk, a hand edit, a truncated copy). A bare read raised
+    UnicodeDecodeError out of every reader, so one bad byte took the whole
+    guard down including `status` and `recall`. Decoding with replacement keeps
+    the good lines: the damaged line fails json.loads and is skipped like any
+    other malformed row.
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
 

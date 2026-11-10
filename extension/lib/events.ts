@@ -17,6 +17,24 @@ export interface EventRecord {
   /** bash rows only, fingerprint-normalized (tool_call and tool_result). */
   cmd: string | null;
   exit: number | null;
+  /** Size of a file change made by edit/write, e.g. "+12/-3". Absent on other
+   *  tools and on rows written before the field existed. */
+  diff_stat?: string | null;
+  /** Changed line range in the new file, e.g. "12-18" or "7". */
+  diff_lines?: string | null;
+  /** First changed line, trimmed — the practical "which symbol/statement" hint. */
+  diff_at?: string | null;
+  /** Bounded tail of the result text: out_chars alone cannot say why a run
+   *  failed. Absent on tool_call rows and on legacy rows. */
+  out_tail?: string | null;
+}
+
+/** Enough to carry an error message or a diff stat line, small enough to read. */
+export const OUT_TAIL_CAP = 400;
+
+export function boundOutTail(text: string, cap: number = OUT_TAIL_CAP): string {
+  const chars = Array.from(text);
+  return chars.length <= cap ? text : chars.slice(-cap).join("");
 }
 
 function nowIso(): string {
@@ -46,7 +64,17 @@ export function toolCallEvent(
 export function toolResultEvent(
   session: string,
   tool: string,
-  opts: { ok: boolean | null; ms: number | null; outChars: number | null; cmd?: string | null; exit?: number | null },
+  opts: {
+    ok: boolean | null;
+    ms: number | null;
+    outChars: number | null;
+    cmd?: string | null;
+    exit?: number | null;
+    outTail?: string | null;
+    diffStat?: string | null;
+    diffLines?: string | null;
+    diffAt?: string | null;
+  },
 ): EventRecord {
   return {
     ts: nowIso(),
@@ -58,6 +86,10 @@ export function toolResultEvent(
     out_chars: opts.outChars,
     cmd: opts.cmd ?? null,
     exit: opts.exit ?? null,
+    out_tail: opts.outTail == null ? null : boundOutTail(opts.outTail),
+    diff_stat: opts.diffStat ?? null,
+    diff_lines: opts.diffLines ?? null,
+    diff_at: opts.diffAt ?? null,
   };
 }
 

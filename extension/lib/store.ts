@@ -393,6 +393,26 @@ export function appendJsonlLocked(file: string, record: unknown): void {
   appendFileSync(file, `${JSON.stringify(record)}\n`, "utf8");
 }
 
+/** Existing file text, or "" when it is absent or unreadable. Used to size a
+ *  write against what it replaced; never throws. */
+export function readTextIfExists(file: string): string {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** Replace a ledger's base file with `rows`, atomically and under the lock.
+ *  Mirrors store.rewrite_jsonl: used for one-shot repairs that must not
+ *  interleave with a concurrent append. Rotated segments are untouched. */
+export function rewriteJsonl(file: string, rows: unknown[]): void {
+  withStoreLock(dirname(file), () => {
+    const body = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+    writeFileSync(file, body, "utf8");
+  });
+}
+
 /** Append one JSON record under the shared cross-runtime store lock. */
 export function appendJsonl(file: string, record: unknown): void {
   withStoreLock(dirname(file), () => appendJsonlLocked(file, record));
@@ -594,6 +614,14 @@ export interface TaskCapture {
   text: string;
   source: "prompt" | "owner";
   ts: string;
+  /** Join key into the event and evidence ledgers: the session that stated the
+   *  task. Without it the three ledgers could not be related to one unit of
+   *  work without guessing from timestamps. */
+  session?: string;
+  /** Files this task actually changed, in first-touch order. The ledgers prove
+   *  a file was edited; this answers "which files did THIS task touch" without
+   *  replaying the event stream (which rotates away). */
+  files?: string[];
 }
 
 /** Baseline that belongs to ONE pi session. Concurrent sessions in one project

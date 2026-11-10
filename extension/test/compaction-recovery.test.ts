@@ -7,6 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import protectContext from "../index.ts";
 import { loadState } from "../lib/store.ts";
+import { readJournal } from "../lib/journal.ts";
 import { TASK_DISPLAY_MAX } from "../lib/brief.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -113,7 +114,10 @@ test("compaction recovery: mid-run re-assertion, journal read path, task anchor"
     await input({ type: "input", text: "Another long instruction that must not replace the owner task" }, ctx);
     const overridden = (await before({}, ctx)) as any;
     assert.match(overridden.message.content, /^task: Ship the audit fixes/);
-    assert.doesNotMatch(overridden.message.content, /must not replace the owner task/);
+    // A later turn no longer replaces the anchor, but it must not vanish either:
+    // it is re-injected as an owner statement instead (audit 2026-11-10).
+    assert.match(overridden.message.content, /^owner intent:$/m);
+    assert.match(overridden.message.content, /^- Another long instruction/m);
 
     // --- mid-run compaction: context re-asserts the block ----------------
     await handler(pi, "session_compact")({ reason: "threshold", willRetry: true }, ctx);
@@ -141,7 +145,17 @@ test("compaction recovery: mid-run re-assertion, journal read path, task anchor"
 
     // --- status surfaces the journal, so the read path is discoverable ---
     const status = textOf(await pi.tools.get("guard_status").execute("s1", {}, null, null, ctx));
-    assert.match(status, /journal: 2 entries \(1 agent\) — guard_journal reads them/);
+    // The owner's own turn is journaled even without an intent keyword, so the
+    // count includes it; only the agent-tagged row is machine-authored.
+    assert.match(status, /journal: 3 entries \(1 agent\) — guard_journal reads them/);
+    const owned = readJournal(dir).filter((row) => row.tags?.includes("owner-prompt"));
+    // Two real turns in this test ("short" is below the capture floor and the
+    // slash command is skipped); both are now recorded verbatim.
+    assert.equal(owned.length, 2, "every real turn is recorded, not just intent-bearing ones");
+    assert.ok(
+      owned.some((row) => /compaction audit fixes/.test(row.text ?? "")),
+      "the owner's words are stored verbatim",
+    );
 
     // --- the task anchor stores exactly what the brief can show ----------
     await pi.commands.get("guard-task").handler(`long ${"w".repeat(400)}`, ctx);

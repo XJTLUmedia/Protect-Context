@@ -10,6 +10,7 @@ import {
   BRIEF_MAX_INTENT,
   BRIEF_MAX_LOOPS,
   BRIEF_MAX_RECALL,
+  OWNER_INTENT_DISPLAY_MAX,
   TASK_DISPLAY_MAX,
 } from "../lib/brief.ts";
 import { DEFAULT_CONTRACT } from "../lib/defaults.ts";
@@ -457,7 +458,10 @@ test("brief: owner intent is injected, labelled, capped and counted", () => {
   });
   assert.match(brief, /^owner intent:$/m);
   assert.match(brief, /^- ship it faster$/m, "the owner's own row carries no marker");
-  assert.match(brief, /^- owner wants zero regressions \(unverified\)$/m);
+  // Trusted rows outrank the agent's paraphrase of them, so both trusted lines
+  // are spent before the agent-tagged one (see the dedicated ordering test).
+  assert.match(brief, /^- prefer one commit per fix$/m);
+  assert.doesNotMatch(brief, /zero regressions/, "the paraphrase yields to trusted rows");
   const shown = brief.split("\n").filter((line) => line.startsWith("- "));
   assert.equal(shown.length, BRIEF_MAX_INTENT);
   assert.match(brief, /^\+1 more owner statements — guard_intent lists them$/m);
@@ -471,4 +475,66 @@ test("brief: owner intent is injected, labelled, capped and counted", () => {
     lastEvidence: null,
   });
   assert.doesNotMatch(deduped, /owner intent:/);
+});
+
+test("brief: the owner's own rows outrank the agent's paraphrase of them", () => {
+  const brief = buildBrief({
+    contract: [],
+    corrections: [],
+    // Newest first, as the reader supplies them: the agent paraphrase is newer,
+    // but a two-line slot must never spend itself on the model's summary while
+    // the trusted instruction is right there.
+    ownerIntent: [
+      { type: "note", text: "owner wants the audit finished", tags: ["owner-want", "agent"] },
+      { type: "note", text: "do not rewrite the parser", tags: ["owner-constraint"] },
+    ],
+    loops: [],
+    lastEvidence: null,
+  });
+  const rows = brief.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(rows[0], "- do not rewrite the parser");
+  assert.match(rows[1] ?? "", /\(unverified\)$/);
+});
+
+test("brief: a truncated owner instruction is announced, not silent", () => {
+  // 120 chars cut the operative tail off real owner corrections with no notice;
+  // the instruction budget is now 200 and a cut sets the truncation line.
+  const long =
+    "Stop hand-writing modules. Install five or more concrete packages, copy mature " +
+    "open-source implementations, vendor their source under vendor/, and adapt their " +
+    "input so the plugin still answers what the owner asked.";
+  assert.ok(long.length > OWNER_INTENT_DISPLAY_MAX);
+  const brief = buildBrief({
+    contract: [],
+    corrections: [],
+    ownerIntent: [{ type: "note", text: long, tags: ["owner-constraint"] }],
+    loops: [],
+    lastEvidence: null,
+  });
+  const row = brief.split("\n").find((line) => line.startsWith("- Stop hand-writing")) ?? "";
+  assert.ok(row.length <= OWNER_INTENT_DISPLAY_MAX + 2, row.length.toString());
+  assert.match(brief, /^journal text truncated — guard_journal shows the full entry$/m);
+});
+
+test("brief: an owner row hidden behind the precedent cap is still injected", () => {
+  // The dedupe used the UNCAPPED precedent list, so a lesson the cap dropped
+  // could swallow an identical owner statement: neither line appeared.
+  const brief = buildBrief({
+    task: "",
+    contract: [],
+    corrections: [],
+    precedents: [
+      { type: "note", text: "lesson a", tags: ["lesson"] },
+      { type: "note", text: "lesson b", tags: ["lesson"] },
+      { type: "note", text: "lesson c", tags: ["lesson"] },
+      { type: "note", text: "use the vendor folder", tags: ["lesson"] },
+    ],
+    precedentsCap: 3,
+    ownerIntent: [{ type: "note", text: "use the vendor folder", tags: ["owner-want"] }],
+    loops: [],
+    lastEvidence: null,
+  });
+  assert.doesNotMatch(brief, /- use the vendor folder \[lesson\]/);
+  assert.match(brief, /^owner intent:$/m);
+  assert.match(brief, /^- use the vendor folder$/m);
 });

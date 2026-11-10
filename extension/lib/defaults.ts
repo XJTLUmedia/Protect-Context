@@ -20,6 +20,8 @@ export interface Contract {
 
 export interface GuardConfig {
   loop_block_after: number;
+  /** Seconds after which an idle failing streak stops blocking (0 = never). */
+  loop_reset_after_s: number;
   diff_warn_lines: number;
   diff_hard_lines: number;
   diff_warn_files: number;
@@ -116,6 +118,7 @@ export const DEFAULT_CONTRACT: Contract = {
 /** Default thresholds — SPEC §2, FROZEN. */
 export const DEFAULT_CONFIG: GuardConfig = {
   loop_block_after: 3,
+  loop_reset_after_s: 300,
   diff_warn_lines: 400,
   diff_hard_lines: 800,
   diff_warn_files: 10,

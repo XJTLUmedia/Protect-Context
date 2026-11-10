@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protect-context"
-version = "3.2.1"
+version = "3.3.0"
 description = "protect-context agent guardrail suite: shared store, MCP server (fastmcp), CLI"
 readme = "README.md"
 license = "MIT"
@@ -34,7 +34,27 @@ classifiers = [
   "Typing :: Typed",
 ]
 requires-python = ">=3.10"
-dependencies = ["fastmcp>=3,<4"]
+# Every third-party module the package imports directly is declared here, even
+# when a dependency would pull it in transitively: `pip install protect-context`
+# into a clean environment used to leave `store.py` importing an undeclared
+# `tenacity` and `layers.py` an undeclared `dotenv`, so the whole package failed
+# at import (found 2026-11-10 by installing the wheel in a bare container).
+# `tests/test_registry.py::test_every_third_party_import_is_declared` keeps this
+# list honest in both directions.
+dependencies = [
+  "cachetools>=5,<8",
+  "fastmcp>=3,<4",
+  "humanize>=4,<5",
+  "mcp>=1.2,<2",
+  "orjson>=3,<4",
+  "pydantic>=2,<3",
+  "pydantic-settings>=2,<3",
+  "pybreaker>=1,<2",
+  "python-dotenv>=1,<2",
+  "rich>=13,<16",
+  "tenacity>=8,<10",
+  "typer>=0.12,<1",
+]
 
 [project.urls]
 Homepage = "https://github.com/XJTLUmedia/Protect-Context"
@@ -48,6 +68,7 @@ dev = ["pytest", "build>=1,<2"]
 
 [project.scripts]
 protect-context = "protect_context.cli:main"
+protect-context-typer = "protect_context.typer_cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

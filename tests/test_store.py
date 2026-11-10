@@ -17,6 +17,7 @@ from protect_context.defaults import DEFAULT_CONFIG
 
 EXPECTED_CONFIG = {
     "loop_block_after": 3,
+    "loop_reset_after_s": 300,
     "diff_warn_lines": 400,
     "diff_hard_lines": 800,
     "diff_warn_files": 10,

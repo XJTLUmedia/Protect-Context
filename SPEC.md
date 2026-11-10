@@ -183,6 +183,10 @@ CLI verbs (mirror MCP tools; exit 0 ok / 1 warning triggered / 2 error):
 | `guard_diff_audit` | `baseline: str = null` | numstat vs HEAD/baseline, verdict vs thresholds |
 | `guard_preflight` | — | tool presence/versions, git-repo check |
 | `guard_budget` | — | session tool-output chars, est. tokens, top-5 tools |
+| `guard_journal` | `type?: "decision"\|"correction"\|"risk"\|"note", limit: int = 5` | recent journal rows, newest last, bounded; ends with a Nudge |
+| `guard_intent` | `limit: int = 5` | owner wants/needs/preferences/constraints/corrections/statements, provenance-labelled, no query |
+| `guard_recall` | `query?, type?, tag?, limit?, evidence_id?, cmd?` | ranked hits over the retained journal + evidence window (amendment 2026-11-06/2026-11-10) |
+| `guard_orientation` | — | repo tree, languages, conventions files, task anchor; memory digest for a new session |
 
 `guard_verify` runs via `subprocess.run(cmd, shell=True, timeout=timeout_s, capture_output=True)`; never raises on nonzero exit — it RECORDS it (that is the point).
 
@@ -203,6 +207,41 @@ to verify runs. Hits are ranked by match strength, then recency, and labelled
 add one hint when a cap hides entries, plus at most two trusted tag matches
 for the owner task. See README.
 
+### Amendment 2026-11-10 — recall ranking quality
+
+The 2026-11-06 tool surface and filters are unchanged, and "no vector database
+and no embeddings" still holds. What changes is how a matching row is scored and
+which rows are shown, because the previous ranker had four measured defects:
+morphology was one-way (`retrieving` found nothing in a row about `retrieval`),
+a verbose row beat a precise one, restatements filled the whole page, and a
+recorded reuse count was ignored.
+
+- **Morphology.** Matching is a word-start hit *or* an equal stem. The stemmer is
+  a small suffix stripper with length guards (`src/protect_context/stem.py`,
+  mirrored in `extension/lib/stem.ts`), chosen over Porter because Porter
+  collapses `organization` to `organ` and starts answering `organic`. The
+  mid-word guard is unchanged: `arch` still never reaches `search`.
+- **Scoring.** BM25 (`k1 = 1.5`, `b = 0.75`) in integer thousandths, with the
+  Lucene IDF `ln(1 + (N - df + 0.5) / (df + 0.5))`. Term frequency saturates and
+  is normalised by row length against the corpus average. Both runtimes compute
+  the same integers; each suite pins the same value table.
+- **Widening.** When a query of three or more keywords matches nothing under the
+  two-word floor, the search runs once more at one shared term and reports
+  `widened`, which the Nudge line states. The strict pass always runs first, so
+  widening can only fill an empty result, never dilute a precise one.
+- **Near-duplicates.** The displayed page collapses `exact` and `candidate` pairs
+  (`src/protect_context/dedup.py`, mirrored in `extension/lib/dedup.ts`):
+  IDF-weighted cosine at or above 0.9 with at least two shared tokens, vetoed
+  when a token absent on one side appears in at most two rows. This never merges
+  ledger rows — it filters the answer only — and `matched` still counts every
+  ranked row.
+- **Reinforcement.** A recorded reuse count adds a bounded boost
+  (`min(uses, 8) * 10`) so a hint that already worked outranks an equivalent
+  one-shot. The ledger stores a count, not per-use dates, so this is NOT ACT-R
+  base-level activation; relevance always dominates.
+
+See README for the measured before/after on each defect.
+
 ### Amendment 2026-11-09 — owner intent
 
 `guard_intent` (MCP + pi) and `intent [--limit N]` (CLI) answer "what does the
@@ -220,9 +259,45 @@ to check" is never captured as owner intent. Rows render as
 `agent` provenance stays unverified. A read never writes and never creates
 `.agent-guard/`.
 
+### Amendment 2026-11-10 — intent completeness, brief fidelity, measured checks
+
+The 2026-11-09 view shipped, and a full audit found that the owner's literal
+request was captured and then unreadable: the `input` handler wrote every
+substantive prompt as a trusted `owner-prompt` row, and no reader classified that
+tag, so `intent` and the brief's owner-intent slot showed only the agent's
+paraphrase. Fixed without changing any store format:
+
+- **Two new kinds.** `owner-constraint` (a start-anchored negation — `do not`,
+  `never`, `avoid`, `must`, `stop`) joins the four intent kinds, and
+  `owner-statement` is the read-time fallback for an `owner-prompt` row that
+  matches no pattern. Kind order is want, need, preference, constraint,
+  correction, statement; the counts line names all six.
+- **`owner-prompt` rows are judged as owner-typed text** (no attribution noun
+  needed) and can never be dropped from the view. Detection is still
+  deterministic and still mirrored in both runtimes.
+- **Detection reads real prompts.** The imperative list grew from 17 to 46 verbs
+  (`audit`, `review`, `install`, `clone`, `vendor`, `test`, `run`, `revert`, …)
+  and an optional leading connective (`please`, `now`, `then`, `also`, `next`,
+  `first`, `so`, `ok`) no longer hides the verb behind it.
+- **Brief.** The two owner-intent lines prefer trusted rows over agent-tagged
+  ones (an agent paraphrase must not displace the owner's instruction), its
+  budget is 200 chars, and a cut line sets the `journal text truncated` notice —
+  as does a cut recall line. Dedupe against journal sections now uses the
+  precedents the cap actually shows; using the uncapped list let a hidden lesson
+  swallow an identical owner statement so neither appeared.
+- **`guard_contract_check` measures 02 and 08** instead of certifying prose: 02
+  requires the newest run to carry the `ok` trust label *and* be cited by id in
+  the summary; 08 compares the real diff against the configured hard limit. The
+  output prints a `basis:` line naming the measurement and the `ok`/`FAIL`/
+  `UNTRUSTED` label, plus the ids that remain self-report keyword coverage.
+- **`status` prints the task anchor** with its source and age in both runtimes.
+- **One version for every artifact**, enforced by
+  `tests/test_registry.py::test_one_version_everywhere`, and a CI workflow
+  (`.github/workflows/check.yml`) that runs the extension suite and pytest.
+
 ## 5. pi extension (`extension/`)
 
-Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi imports → testable via `node --test --experimental-strip-types`). **Zero npm dependencies** (node builtins only); `typebox`/`@earendil-works/pi-coding-agent` type imports are provided by the pi runtime. Loaded via jiti — no build step.
+Entry `extension/index.ts` + pure-logic modules in `extension/lib/` (no pi imports → testable via `node --test --experimental-strip-types`). `typebox`/`@earendil-works/pi-coding-agent` type imports are provided by the pi runtime. Loaded via jiti — no build step.
 
 Event behaviors (all thresholds from config):
 
@@ -242,7 +317,7 @@ Risk patterns (deny-confirm list): `rm -rf /`, `rm -rf ~`, `git push --force` (n
 
 Commands: `/guard-status`, `/guard-contract add|remove|list [text]`, `/guard-verify <cmd>`, `/guard-note <type> <text>`, `/guard-task [<text>|--clear]` (show/replace/clear the owner task anchor), `/guard-report` (full session summary, printed).
 
-Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_intent` (read-only; owner wants/needs/preferences/corrections, `limit` 0-20 default 5, provenance-labelled), `guard_contract_check` (deterministic checklist: for each constraint, mark addressed/unclear from the supplied summary text — heuristic keyword coverage, no LLM), `guard_status` (includes journal totals so the read path is discoverable).
+Model-callable tools (typebox params): `guard_verify`, `guard_note`, `guard_journal` (read-only; `limit` clamped to 0-20 with default 5, optional `type` filter; renders one line per entry plus a `Nudge:` tail, mirroring the MCP tool), `guard_intent` (read-only; owner wants/needs/preferences/constraints/corrections, `limit` 0-20 default 5, provenance-labelled), `guard_contract_check` (deterministic checklist: 02 and 08 measured from the store, the rest keyword coverage of the supplied summary, and a `basis:` line that says which is which), `guard_status` (includes journal totals and the task anchor so the read path is discoverable), and the read-only surfaces that previously existed only over MCP (amendment 2026-11-10): `guard_evidence` (`limit` 0-20 default 5, or one `evidence_id`), `guard_loop_check`, `guard_diff_audit`, `guard_preflight`, `guard_budget`, `guard_contract` (`action` list|add|remove; a model-called write lands in the project layer only), `guard_orientation`. Parity is pinned on both sides: `tests/test_mcp.py` asserts the 13 MCP names and `extension/test/index-lifecycle.test.ts` asserts the same 13 plus the extension-only `guard_contract_check`.
 
 Constraints: **no background processes/sockets/timers from the factory** (defer to `session_start`); idempotent `session_shutdown` cleanup; guard every `ctx.ui.*` with `ctx.hasUI`; never throw from event handlers (catch → `ctx.ui.notify`).
 
@@ -261,9 +336,54 @@ Constraints: **no background processes/sockets/timers from the factory** (defer 
 11. `11-batch-operations` — Batch related shell operations; prefer commands that avoid per-command permission prompts.
 12. `12-budget-context` — Keep tool outputs bounded (head/tail/digest); use targeted reads; avoid re-reading large files.
 
+### Amendment 2026-11-10 — packaging, portability and CI
+
+No store format, tool signature or CLI verb changes. What changes is that the
+package is installable and runnable where the docs say it is, because a clean
+container disagreed with the developer venv in three ways:
+
+- **Every third-party import is a declared dependency.** `store.py` imports
+  `tenacity` and `layers.py` imports `dotenv`, and neither was declared, so
+  `pip install protect-context` into an empty environment produced a package
+  that raised ImportError before running a single command. All twelve direct
+  imports are now declared, and
+  `tests/test_registry.py::test_every_third_party_import_is_declared` reads the
+  source with `ast` and fails when an import has no dependency.
+- **A vendored checkout that cannot import is skipped, not fatal.**
+  `vendored.activate()` prepends `vendor/*` so the vendored copies win. The
+  vendored `pydantic-settings` imports `typing.Self`, so on Python 3.10 the
+  bootstrap raised ImportError and took `import protect_context` with it. A
+  checkout that fails to import now loses its `sys.path` entry and the installed
+  distribution is used — the fallback the module already promised for a missing
+  checkout.
+- **CI is pinned, not assumed.** `.github/workflows/check.yml` runs the extension
+  suite on node 22 and pytest on 3.10 and 3.12. The extension job also installs
+  `git`, `python3` and the package itself, because three of its tests are the
+  cross-runtime contract tests that import `protect_context` from the child
+  interpreter. `tests/test_registry.py` pins both jobs and those prerequisites so
+  a later edit cannot drop one silently. Both jobs were executed in containers
+  (node 22, Python 3.10, Python 3.12) rather than only read.
+- **One version means the lockfile too.** `package-lock.json` records the root
+  version twice and `npm ci` tolerates a mismatch, so it had drifted to 3.2.2;
+  both fields join `test_one_version_everywhere`.
+- **A CLI separator is not part of the command.** `verify -- <cmd>` used to run
+  the literal `-- <cmd>`, which exits 2 and records a FAIL row for a passing
+  command — the worst failure mode for a tool whose point is trustworthy
+  evidence. The `--` is dropped, and a `--timeout` written after the command
+  (the help already says to put it first) gets a hint instead of a mangled run.
+- **Contract text cannot be shortened silently.** `contract add` cut at the
+  500-char cap and reported only the new id. Because the brief re-injects the
+  constraint every prompt, a lost tail changes behaviour permanently, so all
+  four writers (CLI, MCP, pi tool, slash command) now print
+  `note: text truncated N -> M chars (TEXT_CAP 500)`.
+- **The matrix covers the classifiers.** 3.11 and 3.13 joined 3.10 and 3.12 in
+  `check.yml`; both were green in containers first. The workflow is
+  least-privilege (`contents: read`), persists no credentials, and pins every
+  action by commit SHA with the release name in a comment.
+
 ## 7. Testing requirements
 
-Python (pytest, in `.venv`): store roundtrip + flock; contract CRUD + defaults identical to TS (12 ids + exact texts); fingerprint + loop streaks; numstat parser + verdicts; verify runner (uses `true`/`false` shell commands); budget math; orientation digest; CLI smoke for every verb (tmp HOME-cwd fixture so `.agent-guard` is created in a temp dir); **fastmcp in-memory Client smoke over ALL 9 MCP tools**; cross-format: Python parses a TS-format events.jsonl fixture string.
+Python (pytest, in `.venv`): store roundtrip + flock; contract CRUD + defaults identical to TS (12 ids + exact texts); fingerprint + loop streaks; numstat parser + verdicts; verify runner (uses `true`/`false` shell commands); budget math; orientation digest; CLI smoke for every verb (tmp HOME-cwd fixture so `.agent-guard` is created in a temp dir); **fastmcp in-memory Client smoke over ALL 13 MCP tools**; cross-format: Python parses a TS-format events.jsonl fixture string.
 
 TypeScript (`node --test --experimental-strip-types`, tests in `extension/test/`, lib modules stay pi-import-free): fingerprint; risk pattern list (match/non-match cases); loop streak logic; brief digest stability; widget render; numstat/shortstat parser (fixture strings); config load/merge defaults.
 
@@ -280,11 +400,79 @@ No network/LLM calls. Not a sandbox. Not an auto-fixer. No secrets in the store.
 ## 10. Definition of Done
 
 1. pytest green (all suites) AND node tests green — twice consecutively.
-2. All 9 MCP tools callable via fastmcp client smoke.
+2. All 13 MCP tools callable via fastmcp client smoke.
 3. Extension module compiles under jiti semantics (typecheck best-effort documented) and lib tests pass on node 22.
 4. README complete with the 12-goal mapping.
 5. git repo initialized with one conventional initial commit (`.gitignore`: `.agent-guard/`, `.venv/`, `__pycache__/`, `node_modules/`).
 6. Every §1 row traceable to shipped code + at least one test or documented manual verification.
+
+### Amendment 2026-11-10 — capture completeness
+
+Measured on this repo's own `.agent-guard/` after twelve days of real work: the
+journal had 50 rows, **35 of them (70%) cut at the 500-character cap, 31
+mid-word**; journal rows had no stable handle; `edit` rows recorded only a path;
+`bash` rows recorded only `out_chars`; the events ledger had already rotated
+away all but one day of a twelve-day history; and no record joined a task to the
+files and evidence it produced. Those were the recorded answers to "can I
+recover what I actually did", and the store failed several of them.
+
+What does **not** change: the three ledgers and their names, `ev-NNNN`
+allocation, the verify/is-authoritative-for-outcomes rule, the tool surface
+(`guard_note`, `guard_journal`, `guard_recall`, `guard_intent`), the brief
+budget, and the no-embeddings rule. Nothing here adds a network call.
+
+Behaviour changes:
+
+1. **Journal text cap 500 → 4000** (`journal.TEXT_CAP`, `TEXT_CAP` in
+   `extension/lib/journal.ts`). 500 discarded the rationale of most real
+   decisions. Truncation is no longer silent: `journal.add` attaches a
+   display note and the CLI/extension acknowledgement states the cut, and the
+   extension also logs it to stderr through pino.
+2. **Journal rows gain an `id`** (`jn-0001`), allocated from
+   `state.counters.journal_seq` so rotation can never reissue one, with legacy
+   rows bounding the floor. This is the journal's `ev-NNNN`: a decision is now
+   citable instead of addressable only by recency position. Rows written before
+   the field existed are numbered once, in file order, so ids sort
+   chronologically; the repair is idempotent.
+   Journal rows also gain **`session`**, the join key to `events.jsonl` and
+   `verify_runs.jsonl`. Until now a decision and the run that proved it related
+   only by timestamp proximity (45 of 52 happened to fall within five minutes).
+   Legacy rows keep an empty session: the session was never recorded, and
+   inferring it from time brackets would be a fabrication rather than a record.
+3. **`events.jsonl` rows may carry `out_tail`** — the last ≤400 characters of
+   the tool's result. `out_chars` said how much output there was but never why
+   a run failed. Optional field: legacy rows and `tool_call` rows omit it.
+   Rows may also carry **`diff_stat`** (`+12/-3`), the size of the change an
+   `edit`/`write` call made, plus **`diff_lines`** (`12-18`, or `7` for a single
+   line) and **`diff_at`** (the first changed line, trimmed) naming WHERE it
+   landed. Size and location are both measured from a snapshot of the file taken
+   at tool start against the file on disk at tool end, so they describe the real
+   change rather than the arguments the model supplied. A deletion reports the
+   line it followed, so "where" stays answerable. A line count is the smallest unit that answers
+   "one-liner or rewrite" while remaining far too small to reconstruct content;
+   a full diff is deliberately not stored. The counter lives in
+   `extension/lib/diffstat.ts` and `src/protect_context/diffstat.py`, asserted
+   against the same fixtures in both suites.
+
+   **`TaskCapture.files`** records the paths one task changed (bounded, first
+   touch order). The event stream proves an edit happened but rotates away;
+   the anchor does not, so it is what answers "which files did this task touch"
+   once the events are gone.
+4. **A failing verify keeps both ends of its digest.** Passing runs still keep
+   the trailing 2000 characters, but a non-zero exit keeps the head (the
+   originating error or first failing assertion) as well as the tail.
+5. **Ledger retention 1 MB × 3 → 4 MB × 6** (`LEDGER_MAX_BYTES`,
+   `LEDGER_SEGMENTS`). At the old bound a busy day evicted the rest.
+6. **The owner's turn is journaled.** Every real prompt becomes a row tagged
+   `owner-prompt` (plus any detected intent tag), not only prompts that happen
+   to contain an intent keyword, so what was asked survives independent of the
+   agent's paraphrase.
+7. **The task anchor gains `session`**, the join key that relates one task to
+   the events and evidence rows of the same session.
+
+Both runtimes implement 1–3 and the mirrors are covered by tests on each side
+(`tests/test_journal.py`, `extension/test/journal.test.ts`); 4–5 are Python
+only because the digest and rotation live there.
 
 ## 11. Parallel-writer ownership map (build time)
 

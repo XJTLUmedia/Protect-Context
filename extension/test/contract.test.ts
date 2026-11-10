@@ -260,9 +260,61 @@ test("contract_check: empty summary marks everything unclear with a Nudge", () =
 
 test("contract_check: large custom contracts produce bounded id lists", () => {
   const rendered = renderChecklist(
-    Array.from({ length: 80 }, (_, index) => ({ id: String(index).padStart(2, "0"), addressed: false })),
+    Array.from({ length: 80 }, (_, index) => ({
+      id: String(index).padStart(2, "0"),
+      addressed: false,
+      basis: "keyword" as const,
+    })),
   );
 
   assert.match(rendered, /unclear: .* \+56 more/);
   assert.ok(rendered.length < 250);
+});
+
+test("contract_check: facts measure 02 and 08 instead of the summary", () => {
+  const facts = {
+    lastEvidence: { id: "ev-0042", label: "ok" as const },
+    diffLines: 12,
+    diffFiles: 2,
+    diffHardLines: 400,
+  };
+  const items = checkContractSummary("cited ev-0042", DEFAULT_CONTRACT, facts);
+  const byId = (prefix: string) => items.find((item) => item.id.startsWith(prefix))!;
+
+  assert.equal(byId("02").basis, "evidence");
+  assert.equal(byId("02").addressed, true);
+  assert.equal(byId("08").basis, "diff");
+  assert.equal(byId("08").addressed, true);
+
+  const rendered = renderChecklist(items, facts);
+  assert.match(rendered, /basis: evidence ev-0042 ok · diff 2 files 12 lines \(hard 400\) · self-report: /);
+  // 02 and 08 are measured, so they must not be listed as self-report.
+  const selfReport = /self-report: ([^\n]*)/.exec(rendered)?.[1] ?? "";
+  assert.ok(!selfReport.includes("02") && !selfReport.includes("08"), selfReport);
+});
+
+test("contract_check: 02 needs a trustworthy, cited run; 08 fails a huge diff", () => {
+  const base = { diffLines: 10, diffFiles: 1, diffHardLines: 400 };
+  const item = (items: ReturnType<typeof checkContractSummary>, prefix: string) =>
+    items.find((entry) => entry.id.startsWith(prefix))!;
+
+  const untrusted = checkContractSummary("ran ev-0042", DEFAULT_CONTRACT, {
+    ...base,
+    lastEvidence: { id: "ev-0042", label: "UNTRUSTED" },
+  });
+  assert.equal(item(untrusted, "02").addressed, false, "masked exit 0 is not evidence");
+
+  const uncited = checkContractSummary("all good", DEFAULT_CONTRACT, {
+    ...base,
+    lastEvidence: { id: "ev-0042", label: "ok" },
+  });
+  assert.equal(item(uncited, "02").addressed, false, "an uncited run does not satisfy 02");
+  assert.match(renderChecklist(uncited, { ...base, lastEvidence: { id: "ev-0042", label: "ok" } }), /02 unclear: cite the newest evidence id/);
+
+  const huge = checkContractSummary("kept the diff small", DEFAULT_CONTRACT, {
+    ...base,
+    diffLines: 401,
+    lastEvidence: null,
+  });
+  assert.equal(item(huge, "08").addressed, false, "401 lines is a stop-and-split signal");
 });

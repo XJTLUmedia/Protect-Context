@@ -53,6 +53,10 @@ DEFAULT_CONTRACT: list[dict] = [
 
 DEFAULT_CONFIG: dict = {
     "loop_block_after": 3,
+    # Seconds after which an idle failing streak stops blocking (0 = never).
+    # A streak older than this is a half-open circuit: the next identical run is
+    # a deliberate probe, and if it fails again the brake closes immediately.
+    "loop_reset_after_s": 300,
     "diff_warn_lines": 400,
     "diff_hard_lines": 800,
     "diff_warn_files": 10,

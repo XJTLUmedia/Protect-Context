@@ -458,6 +458,7 @@ test("verify: compact line format", () => {
 test("defaults: frozen sizes (pinned shape shared with Python)", () => {
   assert.equal(DEFAULT_CONTRACT.constraints.length, 12);
   assert.equal(DEFAULT_CONTRACT.version, 1);
-  // 9 since brief_max_precedents joined the frozen config shape (both runtimes).
-  assert.equal(Object.keys(DEFAULT_CONFIG).length, 9);
+  // 10 since loop_reset_after_s joined the frozen config shape (both runtimes);
+  // it replaces the hand-rolled reset window with pybreaker's reset_timeout.
+  assert.equal(Object.keys(DEFAULT_CONFIG).length, 10);
 });

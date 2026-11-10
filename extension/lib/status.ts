@@ -34,6 +34,9 @@ export interface StatusData {
   journalCount?: number;
   /** Subset of journalCount tagged `agent` (model-written, never trusted). */
   agentNoteCount?: number;
+  /** Task anchor (SPEC §1 #6). The dashboard answers "what am I doing" too, so
+   *  it shows the same anchor the brief injects (audit 2026-11-10). */
+  task?: { text: string; source?: string | null; ageS?: number | null } | null;
 }
 
 /** Two compact lines + Nudge. */
@@ -56,6 +59,11 @@ export function buildStatus(d: StatusData): string {
       `diff scan: lower bound (${d.diffSkippedFiles ?? 0} skipped, ${d.diffTruncatedFiles ?? 0} truncated)`,
     );
   }
+  if (d.task && d.task.text) {
+    const age = d.task.ageS === null || d.task.ageS === undefined ? "" : ` · ${formatAge(d.task.ageS)} ago`;
+    const source = d.task.source ? ` · ${truncLine(d.task.source, 16)}` : "";
+    lines.push(`task: ${truncLine(d.task.text, 120)}${source}${age}`);
+  }
   if ((d.journalCount ?? 0) > 0) {
     // Make the read path discoverable: journal entries are not all re-injected.
     lines.push(
@@ -69,6 +77,12 @@ export function buildStatus(d: StatusData): string {
   }
   lines.push(`Nudge: ${statusNudge(d)}`);
   return lines.join("\n");
+}
+
+function formatAge(seconds: number): string {
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
 }
 
 function statusNudge(d: StatusData): string {

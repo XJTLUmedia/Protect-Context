@@ -48,6 +48,9 @@ class FakePi {
       }
       return { code: 0, stdout: "verified\n", stderr: "", killed: false };
     }
+    // Preflight probes arbitrary configured tools; answer every `--version`
+    // before the git-only assertion below.
+    if (args[0] === "--version") return { code: 0, stdout: `${command} version 9.9.9\n`, stderr: "", killed: false };
     assert.equal(command, "git");
     const key = args.join(" ");
     if (key === "rev-parse --show-toplevel") return { code: 0, stdout: `${this.cwd}\n`, stderr: "", killed: false };
@@ -132,9 +135,9 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
 
     const slashNote = fake.commands.get("guard-note");
     assert.ok(slashNote);
-    await slashNote.handler("decision owner-approved architecture", ctx);
+    await slashNote.handler("decision owner wants the architecture approved", ctx);
     const afterOwnerNote = (await before({}, ctx)) as any;
-    assert.match(afterOwnerNote.message.content, /owner-approved architecture/);
+    assert.match(afterOwnerNote.message.content, /owner wants the architecture approved/);
     assert.match(
       afterOwnerNote.message.content,
       /agent notes \(unverified\):[\s\S]*model-only decision/,
@@ -256,14 +259,14 @@ test("index lifecycle: compaction re-injects, provenance holds, bash outcomes an
     assert.ok(recallTool, "guard_recall is model-callable");
     const recalled = await recallTool.execute(
       "r1",
-      { query: "owner-approved", type: "decision" },
+      { query: "approved", type: "decision" },
       null,
       null,
       ctx,
     );
     const recallText = recalled.content[0].text as string;
     assert.match(recallText, /trusted · decision/);
-    assert.match(recallText, /owner-approved architecture/);
+    assert.match(recallText, /owner wants the architecture approved/);
     assert.match(recallText, /Nudge:/);
     assert.doesNotMatch(recallText, /model-only/);
 
@@ -385,6 +388,136 @@ test("index lifecycle: a failing guard_verify counts once and blocks its own re-
       ],
       "two failing runs leave two truthful call/result pairs",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("index lifecycle: a file edit records how big the change was and where", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-index-diff-"));
+  try {
+    const fake = new FakePi();
+    fake.cwd = dir;
+    protectContext(fake as unknown as ExtensionAPI);
+    const ctx = {
+      cwd: dir,
+      hasUI: false,
+      sessionManager: { getSessionId: () => "session-diff" },
+      getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+    };
+    await handler(fake, "session_start")({}, ctx);
+
+    const start = handler(fake, "tool_execution_start");
+    const end = handler(fake, "tool_execution_end");
+    const target = join(dir, "notes.txt");
+    writeFileSync(target, "a\nb\nc\nd\n", "utf8");
+
+    // Drive the tool exactly as pi does: start (snapshot) -> edit on disk -> end.
+    await start({ toolCallId: "e1", toolName: "edit", args: { path: "notes.txt" } }, ctx);
+    writeFileSync(target, "a\nB\nc\nd\n", "utf8");
+    await end(
+      { toolCallId: "e1", toolName: "edit", isError: false, result: { content: [{ type: "text", text: "applied" }] } },
+      ctx,
+    );
+
+    // A non-file tool must not pretend to have changed anything.
+    await start({ toolCallId: "r1", toolName: "read", args: { path: "notes.txt" } }, ctx);
+    await end(
+      { toolCallId: "r1", toolName: "read", isError: false, result: { content: [{ type: "text", text: "a\nB\nc\nd" }] } },
+      ctx,
+    );
+
+    const rows = readJsonl<EventRecord>(eventsPath(dir)).filter((row) => row.kind === "tool_result");
+    const edit = rows.find((row) => row.tool === "edit");
+    assert.ok(edit, "the edit result is recorded");
+    assert.equal(edit.diff_stat, "+1/-1", "one line added, one removed");
+    assert.equal(edit.diff_lines, "2", "the change is on line 2 of the new file");
+    assert.equal(edit.diff_at, "B", "the changed line names the location");
+    assert.equal(edit.out_tail, "applied", "the result tail is kept too");
+
+    const read = rows.find((row) => row.tool === "read");
+    assert.equal(read?.diff_stat, null, "a read changes nothing");
+    assert.equal(read?.diff_lines, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The MCP server exposes 13 tools; the extension used to expose 7, so an agent
+// running under the extension alone could not look up evidence, see why a re-run
+// blocked, audit its diff, check the environment, or read its own contract
+// (2026-11-10 audit finding). This test is the parity contract.
+// The 13 names tests/test_mcp.py pins on the Python side.
+const MCP_TOOLS = [
+  "guard_budget",
+  "guard_contract",
+  "guard_diff_audit",
+  "guard_evidence",
+  "guard_intent",
+  "guard_journal",
+  "guard_loop_check",
+  "guard_note",
+  "guard_orientation",
+  "guard_preflight",
+  "guard_recall",
+  "guard_status",
+  "guard_verify",
+];
+// Extension-only: the deterministic checklist has no MCP counterpart yet.
+const EXTENSION_ONLY_TOOLS = ["guard_contract_check"];
+
+test("index lifecycle: the extension exposes every read-only guard surface, and each answers", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-index-tools-"));
+  try {
+    const fake = new FakePi();
+    fake.cwd = dir;
+    protectContext(fake as unknown as ExtensionAPI);
+    const ctx = {
+      cwd: dir,
+      hasUI: false,
+      sessionManager: { getSessionId: () => "session-tools" },
+      getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+    };
+    await handler(fake, "session_start")({}, ctx);
+
+    assert.deepEqual(
+      [...fake.tools.keys()].sort(),
+      [...MCP_TOOLS, ...EXTENSION_ONLY_TOOLS].sort(),
+      "every MCP tool has a pi counterpart, plus the extension-only checklist",
+    );
+
+    const call = async (name: string, params: Record<string, unknown> = {}) => {
+      const tool = fake.tools.get(name);
+      assert.ok(tool, `${name} is registered`);
+      const out = await tool.execute("t1", params, null, null, ctx);
+      return out.content[0].text as string;
+    };
+
+    assert.match(await call("guard_evidence"), /^PC evidence · none recorded$/m);
+    assert.match(await call("guard_evidence", { limit: 0 }), /^PC evidence · none recorded$/m);
+    assert.match(await call("guard_evidence", { evidence_id: "ev-1" }), /no recorded run with id ev-1/);
+    assert.match(await call("guard_loop_check"), /^PC loops · session session-tools$/m);
+    assert.match(await call("guard_diff_audit"), /^PC diff · vs HEAD/);
+    assert.match(await call("guard_budget"), /^PC budget · session session-tools$/m);
+    assert.match(await call("guard_orientation"), /^PC orientation/);
+    // FakePi answers every `--version` with `<tool> version 9.9.9`.
+    const preflight = await call("guard_preflight");
+    assert.match(preflight, /^PC preflight · git repo: yes$/m);
+    assert.match(preflight, /missing: none/);
+
+    const contract = await call("guard_contract");
+    assert.match(contract, /^contract \(12\):/m);
+    assert.match(contract, /01-obey-instructions/);
+    assert.match(await call("guard_contract", { action: "add", text: "prefer small diffs" }), /^contract: added 13 · 13 constraints$/m);
+    assert.match(await call("guard_contract", { action: "remove", text: "13" }), /^contract: removed 13$/m);
+    assert.match(await call("guard_contract", { action: "remove", text: "99" }), /no project constraint '99'/);
+
+    // Every surface ends with an actionable nudge, never a bare dump.
+    for (const name of ["guard_evidence", "guard_loop_check", "guard_diff_audit", "guard_budget", "guard_contract", "guard_orientation", "guard_preflight"]) {
+      const text = await call(name);
+      assert.match(text.split("\n").at(-1)!, /^Nudge: /, `${name} ends with a nudge`);
+      assert.ok(text.length < 2000, `${name} stays bounded (${text.length} chars)`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

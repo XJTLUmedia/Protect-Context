@@ -2,9 +2,10 @@
  * protect-context — pi extension (automatic guardrail layer, SPEC §5).
  *
  * Entry point / wiring only: all logic lives in ./lib/*.ts (pi-import-free,
- * tested via `node --test --experimental-strip-types`). Zero npm runtime
- * dependencies; `typebox`, `@earendil-works/pi-coding-agent` and
- * `@earendil-works/pi-ai` are provided by the pi runtime (loaded via jiti).
+ * tested via `node --test --experimental-strip-types`). `typebox`,
+ * `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are provided by
+ * the pi runtime (loaded via jiti); the guard's own runtime dependencies are
+ * the pinned npm packages in package.json (cosmiconfig, pino, chalk, opossum).
  *
  * Hard rules honored here:
  * - no background processes/sockets/timers from the factory (deferred to
@@ -17,32 +18,20 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { isAbsolute, relative } from "node:path";
+import chalk from "chalk";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { DEFAULT_CONFIG, type GuardConfig } from "./lib/defaults.ts";
 import { loadConfig } from "./lib/config.ts";
 import { matchRisk, normalizeCommand } from "./lib/fingerprint.ts";
-import {
-  appendJsonlLocked,
-  defaultState,
-  ensureStore,
-  eventsPath,
-  fileStamp,
-  loadState,
-  saveState,
-  readJsonl,
-  sessionState,
-  type SessionState,
-  storeDir,
-  verifyRunsPath,
-  withStoreLock,
-} from "./lib/store.ts";
+import { appendJsonlLocked, defaultState, ensureStore, eventsPath, fileStamp, loadState, readJsonl, readTextIfExists, saveState, sessionState, storeDir, type SessionState, verifyRunsPath, withStoreLock } from "./lib/store.ts";
 import {
   addConstraintWithStatus,
   contractLines,
   loadContract,
   personalConstraintCount,
   removeConstraint,
+  TEXT_CAP as CONTRACT_TEXT_CAP,
 } from "./lib/contract.ts";
 import {
   appendJournal,
@@ -52,6 +41,7 @@ import {
   hasAgentTag,
   intentWithTotal,
   isJournalType,
+  OWNER_PROMPT_TAG,
   type JournalType,
   readJournal,
   READ_LIMIT_DEFAULT,
@@ -63,6 +53,7 @@ import {
   tagsWithRequired,
   trustedEntries,
 } from "./lib/journal.ts";
+import { boundedDiffStat, changedSpan, formatDiffStat } from "./lib/diffstat.ts";
 import { toolCallEvent, toolResultEvent, bashExitFromResult, type EventRecord } from "./lib/events.ts";
 import {
   failedAttemptsFromLedgers,
@@ -97,6 +88,14 @@ import {
   type VerifyRun,
 } from "./lib/verify.ts";
 import { buildStatus, type StatusData } from "./lib/status.ts";
+import {
+  probePreflight,
+  renderBudget,
+  renderDiffAudit,
+  renderEvidenceList,
+  renderLoops,
+  renderPreflight,
+} from "./lib/report.ts";
 import { LIMIT_DEFAULT as RECALL_LIMIT_DEFAULT, type RecallType, renderRecall, searchStore, trustedRecallPool } from "./lib/recall.ts";
 
 const WIDGET_ID = "protect-context";
@@ -135,7 +134,11 @@ function reuseKeyOf(args: unknown): string | null {
   return null;
 }
 
-const startTimes = new Map<string, { start: number; tool: string; cmd: string | null }>();
+const startTimes = new Map<
+  string,
+  { start: number; tool: string; cmd: string | null; before: string | null }
+>();
+
   let lastDiff = { lines: 0, files: 0, available: false, lowerBound: false };
   let lastCtxPct: number | null = null;
   // Mid-run re-injection (SPEC §5): a threshold/overflow compaction retries the
@@ -163,6 +166,13 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
   // Blocked tool calls: pi still emits tool_execution_end for them (with the
   // block reason as the "result") — those end events must NOT be recorded as
   // failed tool results, or loop streaks inflate on every blocked attempt.
+  /** Upper bound on the per-task file list: enough to describe the change,
+   *  small enough that the anchor stays readable. */
+  const TASK_FILES_MAX = 40;
+
+  /** Tag marking a journal row as the owner's own words for one turn. Shared
+   *  with the reader (journal.ts) so writer and intent view cannot drift. */
+
   const blockedToolCallIds = new Set<string>();
   // Orientation digest (goal #4): one scan per session, injected from
   // before_agent_start when its digest changes.
@@ -379,7 +389,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
   function openLoopCount(): number {
     let n = 0;
     for (const info of loopState.values()) {
-      if (shouldBlockLoop(info.failures, cfg.loop_block_after)) n += 1;
+      if (shouldBlockLoop(info.failures, cfg.loop_block_after, info.lastFailedAt, cfg.loop_reset_after_s * 1000)) n += 1;
     }
     return n;
   }
@@ -436,11 +446,22 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       diffScanLimited: d.scanLimited,
       diffSkippedFiles: d.skippedFiles,
       diffTruncatedFiles: d.truncatedFiles,
-      loops: openLoopsFromMap(loopState, cfg.loop_block_after),
+      loops: openLoopsFromMap(loopState, cfg.loop_block_after, cfg.loop_reset_after_s * 1000),
       evidenceCount: ev.count,
       contractCount: loadContract(ctx.cwd).constraints.length,
       journalCount: journal.length,
       agentNoteCount: journal.filter((entry) => hasAgentTag(entry.tags)).length,
+      // The status dashboard answers "what am I doing" as well as "where is the
+      // tree": same anchor the brief injects, with its age.
+      task: state?.task
+        ? {
+            text: state.task.text,
+            source: state.task.source,
+            ageS: Number.isFinite(Date.parse(state.task.ts))
+              ? Math.max(0, (Date.now() - Date.parse(state.task.ts)) / 1000)
+              : null,
+          }
+        : null,
       lastVerify: ev.last,
       ctxPct: lastCtxPct,
       diffWarnLines: cfg.diff_warn_lines,
@@ -482,6 +503,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
           appendJournal(ctx.cwd, {
             type: "risk",
             text: `guard_verify ran a command matching risk pattern '${risk}': ${fp}`,
+            session: session.id,
           });
         } catch {
           // journal is best-effort; never block the evidence write
@@ -491,8 +513,16 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
 
     // (b) loop check on fingerprint — identical arithmetic to the bash path
     refreshLoopStateIfChanged(ctx.cwd);
-    const failures = loopState.get(streakKey)?.failures ?? 0;
-    if (shouldBlockLoop(failures, cfg.loop_block_after)) {
+    const prior = loopState.get(streakKey);
+    const failures = prior?.failures ?? 0;
+    if (
+      shouldBlockLoop(
+        failures,
+        cfg.loop_block_after,
+        prior?.lastFailedAt ?? null,
+        cfg.loop_reset_after_s * 1000,
+      )
+    ) {
       return `${loopBlockReason(truncLine(fp, CMD_DISPLAY_MAX), failures)}\nNudge: not run, not recorded — change approach or gather new information first.`;
     }
 
@@ -621,7 +651,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
     const journal = readJournal(ctx.cwd);
     // In-memory streaks are the merged view (bash events + guard_verify
     // outcomes) — the disk events alone would miss verify streaks.
-    const loops = openLoopsFromMap(loopState, cfg.loop_block_after).slice(0, 2);
+    const loops = openLoopsFromMap(loopState, cfg.loop_block_after, cfg.loop_reset_after_s * 1000).slice(0, 2);
     const last = sessionEvidence(ctx.cwd).last;
     return buildBrief({
       task: state.task?.text ?? null,
@@ -748,27 +778,36 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       // only the agent's paraphrase, and it survives events-ledger rotation.
       // This runs before the task-anchor early return: a later prompt still
       // states intent even when the task is already anchored.
+      // Every real turn is recorded, not only the ones carrying an intent
+      // keyword. A prompt without "should" or "must" still states what the
+      // owner asked for, and reconstructing that later from the agent's own
+      // paraphrase is exactly the gap this closes. `owner-prompt` marks the
+      // row so the intent view can still narrow to actual wants/corrections.
       const intents = detectIntent(text, true);
-      if (intents.length > 0) {
-        try {
-          const already = recentJournal(readJournal(ctx.cwd), 20).some(
-            (entry) => entry.text === captured,
-          );
-          if (!already) {
-            appendJournal(ctx.cwd, {
-              type: intents.includes("owner-correction") ? "correction" : "note",
-              text: captured,
-              tags: [...intents],
-            });
-          }
-        } catch {
-          // Journaling is best-effort: a store that cannot be written must not
-          // cost the session its task anchor below.
+      try {
+        const already = recentJournal(readJournal(ctx.cwd), 20).some(
+          (entry) => entry.text === captured,
+        );
+        if (!already) {
+          appendJournal(ctx.cwd, {
+            type: intents.includes("owner-correction") ? "correction" : "note",
+            text: captured,
+            session: session.id,
+            tags: [...intents, OWNER_PROMPT_TAG],
+          });
         }
+      } catch {
+        // Journaling is best-effort: a store that cannot be written must not
+        // cost the session its task anchor below.
       }
       const existing = state.task;
       if (existing?.source === "owner" || existing?.text === captured) return undefined;
-      state.task = { text: captured, source: "prompt", ts: new Date().toISOString() };
+      state.task = {
+        text: captured,
+        source: "prompt",
+        ts: new Date().toISOString(),
+        session: session.id,
+      };
       // The brief changed: let this same turn re-inject it.
       view.brief_digest = null;
       saveState(ctx.cwd, state);
@@ -818,6 +857,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
             appendJournal(ctx.cwd, {
               type: "risk",
               text: `bash tool_call matched risk pattern '${risk}': ${fp}`,
+              session: session.id,
             });
           } catch {
             // journal is best-effort; never block the tool call over it
@@ -830,8 +870,16 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       // in-memory check and the tool-call record.
       const blockedFailures = withStoreLock(storeDir(ctx.cwd), () => {
         if (loopLedgerMemo !== loopLedgerStamp(ctx.cwd)) rebuildLoopStateUnlocked(ctx.cwd);
-        const failures = loopState.get(streakKey)?.failures ?? 0;
-        if (shouldBlockLoop(failures, cfg.loop_block_after)) {
+        const prior = loopState.get(streakKey);
+        const failures = prior?.failures ?? 0;
+        if (
+          shouldBlockLoop(
+            failures,
+            cfg.loop_block_after,
+            prior?.lastFailedAt ?? null,
+            cfg.loop_reset_after_s * 1000,
+          )
+        ) {
           appendJsonlLocked(
             eventsPath(ctx.cwd),
             toolCallEvent(session.id, "bash", { cmd: fp, blocked: true }),
@@ -851,7 +899,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
     }),
   );
 
-  pi.on("tool_execution_start", async (event, _ctx) => {
+  pi.on("tool_execution_start", async (event, ctx) => {
     try {
       let cmd: string | null = null;
       if (event.toolName === "bash") {
@@ -860,7 +908,17 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       } else {
         cmd = reuseKeyOf(event.args);
       }
-      startTimes.set(event.toolCallId, { start: Date.now(), tool: event.toolName, cmd });
+      // Snapshot the file before the change so the end handler can measure the
+      // real diff (size AND location) rather than guessing from the arguments.
+      let before: string | null = null;
+      if ((event.toolName === "edit" || event.toolName === "write") && cmd !== null) {
+        try {
+          before = readTextIfExists(resolve(ctx.cwd, cmd));
+        } catch {
+          before = null;
+        }
+      }
+      startTimes.set(event.toolCallId, { start: Date.now(), tool: event.toolName, cmd, before });
     } catch {
       // timing is best-effort
     }
@@ -919,11 +977,41 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
         }
       }
 
+      // Measure what the file tool actually did: size AND location, from the
+      // snapshot taken before the call against the file on disk now. null for
+      // every other tool and when the snapshot or the file is unavailable.
+      let diffStat: string | null = null;
+      let diffLines: string | null = null;
+      let diffAt: string | null = null;
+      if (meta?.before != null && meta.cmd !== null && (event.toolName === "edit" || event.toolName === "write")) {
+        try {
+          const after = readTextIfExists(resolve(ctx.cwd, meta.cmd));
+          const span = changedSpan(meta.before, after);
+          if (span.startLine > 0) {
+            diffStat = formatDiffStat(boundedDiffStat(meta.before, after));
+            diffLines = span.endLine > span.startLine ? `${span.startLine}-${span.endLine}` : String(span.startLine);
+            diffAt = span.firstLine === "" ? null : span.firstLine;
+          }
+        } catch {
+          // sizing is best-effort and must never block the result record
+        }
+      }
+
       withStoreLock(storeDir(ctx.cwd), () => {
         if (loopLedgerMemo !== loopLedgerStamp(ctx.cwd)) rebuildLoopStateUnlocked(ctx.cwd);
         appendJsonlLocked(
           eventsPath(ctx.cwd),
-          toolResultEvent(session.id, event.toolName, { ok, ms, outChars, cmd, exit }),
+          toolResultEvent(session.id, event.toolName, {
+            ok,
+            ms,
+            outChars,
+            cmd,
+            exit,
+            outTail: text,
+            diffStat,
+            diffLines,
+            diffAt,
+          }),
         );
         // Incremental streak update (shell runs only). The rebuild above first
         // incorporates external writers, then this result is applied once; a
@@ -932,6 +1020,16 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
           recordLoopOutcome(cmd, ok, exit, event.toolName);
         }
         loopLedgerMemo = loopLedgerStamp(ctx.cwd);
+        // Remember which files this task changed. The event stream proves an
+        // edit happened, but it rotates away; the task anchor does not, so it
+        // is what answers "which files did this task touch" months later.
+        if ((event.toolName === "edit" || event.toolName === "write") && state.task && meta?.cmd) {
+          const files = state.task.files ?? [];
+          if (!files.includes(meta.cmd) && files.length < TASK_FILES_MAX) {
+            state.task.files = [...files, meta.cmd];
+            saveState(ctx.cwd, state);
+          }
+        }
       });
 
       renderWidgetNow(ctx);
@@ -957,7 +1055,9 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
             saveState(ctx.cwd, state);
             if (ctx.hasUI) {
               ctx.ui.notify(
-                `guard: context at ${Math.round(usage.percent)}% — consider /compact to free budget.`,
+                chalk.yellow(
+                  `guard: context at ${Math.round(usage.percent)}% — consider /compact to free budget.`,
+                ),
                 "warning",
               );
             }
@@ -985,7 +1085,9 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
             saveState(ctx.cwd, state);
             if (ctx.hasUI) {
               ctx.ui.notify(
-                `guard: diff reached ${lines} lines (hard limit ${cfg.diff_hard_lines}) — split before continuing.`,
+                chalk.red(
+                  `guard: diff reached ${lines} lines (hard limit ${cfg.diff_hard_lines}) — split before continuing.`,
+                ),
                 "error",
               );
             }
@@ -996,7 +1098,9 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
           saveState(ctx.cwd, state);
           if (ctx.hasUI) {
             ctx.ui.notify(
-              `guard: diff reached ${lines} lines (warn ${cfg.diff_warn_lines}) — consider splitting.`,
+              chalk.yellow(
+                `guard: diff reached ${lines} lines (warn ${cfg.diff_warn_lines}) — consider splitting.`,
+              ),
               "warning",
             );
           }
@@ -1106,13 +1210,18 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
             // constraint past the cap would be silently DROPPED while the
             // owner believes it is enforced — warn instead.
             const over = total > BRIEF_MAX_CONTRACT_LINES;
+            // A silently shortened constraint is re-injected every prompt, so the
+            // owner must hear about the cut, not discover it in contract.json.
+            const cut = rest.length > c.text.length
+              ? `\nnote: text truncated ${rest.length} -> ${c.text.length} chars (TEXT_CAP ${CONTRACT_TEXT_CAP})`
+              : "";
             const ack = !result.added
               ? `constraint ${c.id} already exists\nNudge: no duplicate was written.`
               : over
-              ? `added ${c.id}${where}\nwarning: ${total} constraints exceed the ${BRIEF_MAX_CONTRACT_LINES}-line brief cap — ` +
+              ? `added ${c.id}${where}${cut}\nwarning: ${total} constraints exceed the ${BRIEF_MAX_CONTRACT_LINES}-line brief cap — ` +
                 `only the ${BRIEF_MAX_CONTRACT_LINES} highest-priority owner/seed constraints are re-injected.` +
                 `\nNudge: keep the contract tight — fewer, sharper constraints survive re-injection.`
-              : `added ${c.id}${where}\nNudge: the brief re-injects on your next prompt.`;
+              : `added ${c.id}${where}${cut}\nNudge: the brief re-injects on your next prompt.`;
             ctx.ui.notify(ack, result.added && over ? "warning" : "info");
           }
           return undefined;
@@ -1168,7 +1277,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
           if (ctx.hasUI) ctx.ui.notify("usage: /guard-note <decision|correction|risk|note> <text>", "warning");
           return undefined;
         }
-        appendJournal(ctx.cwd, { type, text: m[2].trim() });
+        appendJournal(ctx.cwd, { type, text: m[2].trim(), session: session.id });
         if (ctx.hasUI) ctx.ui.notify(`journal: ${type} recorded\nNudge: check corrections before similar work.`, "info");
         return undefined;
       }),
@@ -1300,7 +1409,8 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
       const entry = appendJournal(ctx.cwd, {
         type: params.type,
         text: params.text,
-        tags: tagsWithRequired(params.tags ?? [], "agent"),
+        session: session.id,
+            tags: tagsWithRequired(params.tags ?? [], "agent"),
       });
       return {
         content: [
@@ -1434,7 +1544,7 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
     name: "guard_contract_check",
     label: "Guard Contract Check",
     description:
-      "Deterministic checklist: marks each contract constraint addressed/unclear based on keyword coverage of a change summary. No LLM involved.",
+      "Deterministic checklist: 02 (trustworthy evidence cited) and 08 (diff under the hard limit) are measured from the store; the rest is keyword coverage of the change summary. No LLM involved.",
     promptSnippet: "Check a change summary against the contract constraints",
     promptGuidelines: [
       "Use guard_contract_check with a change summary before claiming a task satisfies the contract.",
@@ -1444,7 +1554,18 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const contract = loadContract(ctx.cwd);
-      const text = renderChecklist(checkContractSummary(params.summary, contract));
+      // Two of the twelve constraints are measurable here: 02 needs a
+      // trustworthy run that the summary cites, 08 needs the real diff size.
+      // Without them the checklist only certified the model's own prose.
+      const ev = sessionEvidence(ctx.cwd);
+      const diff = await gatherDiff(ctx);
+      const facts = {
+        lastEvidence: ev.last ? { id: ev.last.id, label: outcomeLabel(ev.last) } : null,
+        diffLines: diff.available ? diff.lines : null,
+        diffFiles: diff.available ? diff.files : null,
+        diffHardLines: cfg.diff_hard_lines,
+      };
+      const text = renderChecklist(checkContractSummary(params.summary, contract, facts), facts);
       return { content: [{ type: "text", text }], details: {} };
     },
   });
@@ -1459,6 +1580,202 @@ const startTimes = new Map<string, { start: number; tool: string; cmd: string | 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const text = buildStatus(await gatherStatus(ctx));
       return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+
+  // Read-only surfaces the MCP server already had (SPEC §4). Without them an
+  // agent running under the extension alone could not look up an evidence id,
+  // see why a re-run blocks, audit its own diff, check the environment, or
+  // read the contract it is being held to.
+  pi.registerTool({
+    name: "guard_evidence",
+    label: "Guard Evidence",
+    description:
+      "Read recorded verification runs without re-running anything. Without evidence_id it lists the newest `limit` " +
+      "runs (0-20, default 5): id, trust label, exit, duration, command, plus the last digest line of any non-ok row. " +
+      "With evidence_id it renders that one run in full. ok proves the check, FAIL proves it failed, UNTRUSTED exited 0 " +
+      "through a pipe or `|| true` and proves nothing.",
+    promptSnippet: "Read past evidence runs and their digests",
+    promptGuidelines: [
+      "Use guard_evidence to recover an evidence id or digest instead of re-running the same command.",
+      "Only an ok id may be cited as proof; UNTRUSTED never proves the check.",
+    ],
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Integer({ description: "How many newest runs to list (0-20, default 5)" })),
+      evidence_id: Type.Optional(Type.String({ description: "One id to render in full, e.g. ev-0007" })),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const runs = readVerifyRuns(ctx.cwd);
+      const wanted = (params.evidence_id ?? "").trim();
+      if (wanted) {
+        const match = /^ev-0*(\d+)$/i.exec(wanted);
+        const id = match ? `ev-${match[1].padStart(4, "0")}` : wanted;
+        const run = runs.find((r) => r.id === id);
+        const text = run
+          ? renderVerifyReport(run, ctx.cwd)
+          : `evidence: no recorded run with id ${truncLine(wanted, 40)}\n` +
+            "Nudge: call guard_evidence without an id to list the recent window.";
+        return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+      }
+      const limit = params.limit === undefined ? READ_LIMIT_DEFAULT : boundedReadLimit(params.limit);
+      const shown = limit === 0 ? [] : runs.slice(-limit);
+      return Promise.resolve({
+        content: [{ type: "text", text: renderEvidenceList(shown, runs.length) }],
+        details: {},
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_loop_check",
+    label: "Guard Loop Check",
+    description:
+      "Failing-command streaks for this session and whether the next identical re-run blocks. Takes no parameters. " +
+      "Streaks come from bash outcomes and guard_verify rows; an unproven exit 0 does not reset one.",
+    promptSnippet: "Show failing-command streaks before re-running",
+    promptGuidelines: ["Use guard_loop_check before repeating a command that just failed."],
+    parameters: Type.Object({}),
+    execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const text = renderLoops([...loopState.values()], cfg, session.id);
+      void ctx;
+      return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_diff_audit",
+    label: "Guard Diff Audit",
+    description:
+      "Audit the working tree against the session-start baseline: changed files, changed lines, and the verdict " +
+      "against config (warn at diff_warn_lines/diff_warn_files, hard at diff_hard_lines). Takes no parameters.",
+    promptSnippet: "Audit how big the current change is",
+    promptGuidelines: ["Use guard_diff_audit before a large edit, or when status shows a warn or hard diff."],
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const diff = await gatherDiff(ctx);
+      const text = renderDiffAudit({
+        ...diff,
+        warnLines: cfg.diff_warn_lines,
+        warnFiles: cfg.diff_warn_files,
+        hardLines: cfg.diff_hard_lines,
+      });
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_preflight",
+    label: "Guard Preflight",
+    description:
+      "Environment check: is this a git work tree, and are the configured tools present? Each tool is probed with " +
+      "`<tool> --version` (2s per tool, 15s overall, at most 20 tools). A slow or nonzero probe is reported as an " +
+      "incomplete version, never as a missing tool.",
+    promptSnippet: "Check tool presence and versions before blaming code",
+    promptGuidelines: ["Use guard_preflight when a tool fails in a surprising way, before blaming the code."],
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const diff = await gatherDiff(ctx);
+      const facts = await probePreflight(cfg.preflight_tools, (cmd, args, opts) => pi.exec(cmd, args, opts), {
+        gitRepo: diff.repo,
+      });
+      return { content: [{ type: "text", text: renderPreflight(facts) }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_budget",
+    label: "Guard Budget",
+    description:
+      "This session's recorded tool-output size: total characters, estimated tokens (chars/4), tool-result count " +
+      "and the top 5 tools by characters. Takes no parameters; read-only over events.jsonl.",
+    promptSnippet: "Show which tools produced the most context",
+    promptGuidelines: ["Use guard_budget when a turn is getting large, to see which tools produced the bytes."],
+    parameters: Type.Object({}),
+    execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const perTool = new Map<string, number>();
+      let count = 0;
+      for (const event of readEvents(ctx.cwd)) {
+        if (event.session !== session.id || event.kind !== "tool_result") continue;
+        count += 1;
+        const chars = typeof event.out_chars === "number" && event.out_chars > 0 ? event.out_chars : 0;
+        const tool = typeof event.tool === "string" && event.tool ? event.tool : "unknown";
+        perTool.set(tool, (perTool.get(tool) ?? 0) + chars);
+      }
+      const top = [...perTool.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const chars = top.reduce((sum, [, value]) => sum + value, 0);
+      const text = renderBudget({ session: session.id, chars, events: count, top });
+      return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_contract",
+    label: "Guard Contract",
+    description:
+      "Read or change the project contract (the constraints re-injected into the brief). action defaults to list; " +
+      "add takes text, remove takes an id. A model-called write lands in the project layer only — the personal " +
+      "layer is owner-only (/guard-contract --global).",
+    promptSnippet: "Read the contract the agent is held to",
+    promptGuidelines: [
+      "Use guard_contract list to read the constraints before claiming compliance.",
+      "Never add a constraint on your own authority: ask the owner instead.",
+    ],
+    parameters: Type.Object({
+      action: Type.Optional(
+        Type.Unsafe<"list" | "add" | "remove">({ type: "string", enum: ["list", "add", "remove"] }),
+      ),
+      text: Type.Optional(Type.String({ description: "Constraint text (add) or constraint id (remove)" })),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const action = params.action ?? "list";
+      const value = (params.text ?? "").trim();
+      if (action === "add") {
+        const text =
+          value === ""
+            ? "contract: add needs constraint text\nNudge: guard_contract action=add text=<constraint>"
+            : (() => {
+                const result = addConstraintWithStatus(ctx.cwd, value, "agent", "project");
+                // A constraint that silently loses its operative tail is worse than
+                // a truncated journal row: the brief re-injects it every prompt.
+                const cut = value.length > result.constraint.text.length
+                  ? `\nnote: text truncated ${value.length} -> ${result.constraint.text.length} chars (TEXT_CAP ${CONTRACT_TEXT_CAP})`
+                  : "";
+                return `contract: ${result.added ? "added" : "already present"} ${result.constraint.id} · ${result.total} constraints${cut}\n` +
+                  `Nudge: ${result.added ? "the brief re-injects it on the next prompt." : "no duplicate was written."} ` +
+                  "A constraint the owner did not ask for is out of scope.";
+              })();
+        return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+      }
+      if (action === "remove") {
+        const removed = value !== "" && removeConstraint(ctx.cwd, value, "project");
+        const text = removed
+          ? `contract: removed ${truncLine(value, 40)}\nNudge: the contract re-injects on your next prompt.`
+          : `contract: no project constraint '${truncLine(value, 40)}'\n` +
+            "Nudge: guard_contract action=list shows the ids; the personal layer is owner-only.";
+        return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+      }
+      const contract = loadContract(ctx.cwd);
+      const personal = personalConstraintCount();
+      const text =
+        `contract (${contract.constraints.length}):\n${contractLines(contract).join("\n")}` +
+        (personal > 0 ? `\npersonal layer: ${personal} (applies to every project)` : "") +
+        "\nNudge: cite the ids you actually satisfied; guard_contract_check measures 02 and 08 from the store.";
+      return Promise.resolve({ content: [{ type: "text", text }], details: {} });
+    },
+  });
+
+  pi.registerTool({
+    name: "guard_orientation",
+    label: "Guard Orientation",
+    description:
+      "Bounded repository digest: top-level tree, language counts and the conventions files present. Takes no " +
+      "parameters. Use it before the first edit in an unfamiliar checkout.",
+    promptSnippet: "Orient in the repository before the first edit",
+    promptGuidelines: ["Use guard_orientation before editing a directory you have not read."],
+    parameters: Type.Object({}),
+    execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const text = renderOrientation(scanOrientation(ctx.cwd));
+      return Promise.resolve({ content: [{ type: "text", text }], details: {} });
     },
   });
 }

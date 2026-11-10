@@ -1,10 +1,32 @@
-"""guard_status dashboard (SPEC §4): session, Δdiff, loop streaks, evidence
-count, contract size, last verify — compact, ends with an actionable Nudge.
+"""guard_status dashboard (SPEC §4): task anchor, session, Δdiff, loop
+streaks, evidence count, contract size, last verify — compact, ends with an
+actionable Nudge.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from . import contract, diffscope, loops, orientation, store, verify
+
+
+def _task_age(ts: object) -> str:
+    """Human age of the task anchor, or "" when the timestamp is unusable."""
+    raw = str(ts or "").strip()
+    if not raw:
+        return ""
+    try:
+        then = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - then).total_seconds()))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
 
 
 def status() -> tuple[str, int]:
@@ -21,6 +43,16 @@ def status() -> tuple[str, int]:
         f"PC status · session {store.display_text(sid, 80)} · "
         f"git {store.display_text(git_label, 80)}"
     ]
+    # What the agent is supposed to be doing, not just where the tree stands: the
+    # task anchor exists, so the dashboard that answers "how is it going" must
+    # show it (audit 2026-11-10).
+    task = store.load_state().get("task") or {}
+    task_text = store.display_text(task.get("text"), 120)
+    if task_text:
+        age = _task_age(task.get("ts"))
+        source = store.display_text(task.get("source"), 16)
+        meta = " · ".join(part for part in (source, f"{age} ago" if age else "") if part)
+        lines.append(f"task: {task_text}" + (f" ({meta})" if meta else ""))
     if "error" in d:
         lines.append("Δdiff n/a (not a git repo)")
         diff_unavailable = True

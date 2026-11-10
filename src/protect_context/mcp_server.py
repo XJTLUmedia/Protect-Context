@@ -265,8 +265,14 @@ def guard_contract(
             return (f"contract: identical constraint already present ({len(cons)} total)\n"
                     "Nudge: reuse the existing constraint instead of duplicating it.")
         warn = contract.brief_cap_warning(len(cons))
+        truncated = (
+            f"note: text truncated {len(str(text))} -> {len(c['text'])} chars (TEXT_CAP {contract.MAX_TEXT})"
+            if len(str(text)) > len(c["text"])
+            else ""
+        )
         return (f"added {c['id']}\n" + contract.render(cons) +
                 (f"\n{warn}" if warn else "") +
+                (f"\n{truncated}" if truncated else "") +
                 "\nNudge: keep the contract tight — fewer, sharper constraints survive re-injection.")
     if action == "remove":
         if not id:

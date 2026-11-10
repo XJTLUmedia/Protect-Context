@@ -3,6 +3,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { cosmiconfigSync } from "cosmiconfig";
 import { DEFAULT_CONFIG, type GuardConfig } from "./defaults.ts";
 import { configPath, readJson, storeDir, userConfigPath, withStoreLock, writeJson } from "./store.ts";
 
@@ -28,6 +29,9 @@ export function mergeConfig(
 
   const p = partial as Record<string, unknown>;
   if (isInteger(p.loop_block_after) && p.loop_block_after >= 1) cfg.loop_block_after = p.loop_block_after;
+  if (isInteger(p.loop_reset_after_s) && p.loop_reset_after_s >= 0) {
+    cfg.loop_reset_after_s = p.loop_reset_after_s;
+  }
   if (isInteger(p.diff_warn_lines) && p.diff_warn_lines >= 0) cfg.diff_warn_lines = p.diff_warn_lines;
   if (isInteger(p.diff_hard_lines) && p.diff_hard_lines >= 0) cfg.diff_hard_lines = p.diff_hard_lines;
   if (isInteger(p.diff_warn_files) && p.diff_warn_files >= 0) cfg.diff_warn_files = p.diff_warn_files;
@@ -80,11 +84,26 @@ function explicitProjectKeys(raw: Record<string, unknown> | null): Record<string
  * has the documented configuration surface without the Python CLI; the seed is
  * the built-in defaults, never the merged view. Corrupt files are never
  * overwritten. */
+/** One config layer, read through cosmiconfig's loaders so JSON/JSON5/YAML and
+ * a missing file are all handled the same way. Falls back to the plain reader
+ * when the file exists but cannot be parsed. */
+const explorer = cosmiconfigSync("protect-context", { searchPlaces: [] });
+
+function readLayer<T>(path: string): T | null {
+  if (!path) return null;
+  try {
+    const loaded = explorer.load(path);
+    return (loaded?.config as T) ?? null;
+  } catch {
+    return readJson<T>(path);
+  }
+}
+
 function readLoadedConfig(cwd: string): LoadedConfig {
   const path = configPath(cwd);
   const existed = existsSync(path);
-  const personalRaw = readJson<Record<string, unknown>>(userConfigPath());
-  const projectRaw = readJson<Record<string, unknown>>(path);
+  const personalRaw = readLayer<Record<string, unknown>>(userConfigPath());
+  const projectRaw = readLayer<Record<string, unknown>>(path);
   const personal = mergeConfig(personalRaw ?? undefined);
   const config = mergeConfig(explicitProjectKeys(projectRaw), personal);
   const extras = { ...layerExtras(personalRaw), ...layerExtras(projectRaw) };

@@ -81,6 +81,10 @@ function clampPrecedentsCap(value: unknown): number {
 }
 /** Agent-note display cap (chars) — shorter than a trusted entry on purpose. */
 export const AGENT_NOTE_DISPLAY_MAX = 120;
+/** Owner-intent display cap (chars). A trusted instruction is what the turn is
+ *  for, so it gets the same room as a decision (200): at 120 the operative tail
+ *  of a multi-clause request fell off with no notice (2026-11-10). */
+export const OWNER_INTENT_DISPLAY_MAX = 200;
 /** Command display cap (chars) — matches Python's cmd[:60] discipline. */
 export const CMD_DISPLAY_MAX = 60;
 
@@ -283,22 +287,40 @@ export function buildBrief(input: BriefInput): string {
     }
   }
 
-  // What the owner actually asked for, newest first. This is the line a new
-  // session would otherwise have to reconstruct by reading the whole journal;
-  // rows already visible in the journal sections above are skipped.
+  // The owner's own words, newest first. This is the line a new session would
+  // otherwise have to reconstruct by reading the whole journal; rows already
+  // visible in the journal sections above are skipped.
+  //
+  // Dedupe must use the precedents the cap actually shows: passing the uncapped
+  // list let a hidden lesson swallow an identical owner statement, so neither
+  // appeared anywhere in the brief (2026-11-10).
+  const rankedPrecedents = rankPrecedents(input.task ?? "", input.precedents ?? []);
+  const precedentsShown = rankedPrecedents.slice(0, clampPrecedentsCap(input.precedentsCap));
   const alreadyVisible = visibleJournalText(
-    input.precedents ?? [],
+    precedentsShown,
     input.decisions ?? [],
     input.corrections,
   );
-  const intents = (input.ownerIntent ?? []).filter(
+  const intentsFiltered = (input.ownerIntent ?? []).filter(
     (entry) => !alreadyVisible.has(normalizeOneLine(entry.text, 10_000)),
   );
+  // The owner's record outranks the model's report of it: a paraphrase the agent
+  // wrote must never push a trusted instruction out of the two injected lines.
+  const intents = [
+    ...intentsFiltered.filter((entry) => !hasAgentTag(entry.tags)),
+    ...intentsFiltered.filter((entry) => hasAgentTag(entry.tags)),
+  ];
+  let intentTruncated = false;
   if (intents.length > 0) {
     lines.push("owner intent:");
     for (const entry of intents.slice(0, BRIEF_MAX_INTENT)) {
+      const full = normalizeOneLine(entry.text, 10_000);
+      const shown = trunc(full, OWNER_INTENT_DISPLAY_MAX);
+      // A cut instruction is announced like every other truncation; the tail is
+      // often the operative clause ("...and do not touch the README").
+      if (shown !== full) intentTruncated = true;
       const unverified = hasAgentTag(entry.tags) ? " (unverified)" : "";
-      lines.push(`- ${truncLine(entry.text, AGENT_NOTE_DISPLAY_MAX)}${unverified}`);
+      lines.push(`- ${shown}${unverified}`);
     }
     const more = intents.length - Math.min(intents.length, BRIEF_MAX_INTENT);
     if (more > 0) lines.push(`+${more} more owner statements — guard_intent lists them`);
@@ -311,7 +333,7 @@ export function buildBrief(input: BriefInput): string {
     appendJournalSection(
       lines,
       "precedents:",
-      rankPrecedents(input.task ?? "", input.precedents ?? []),
+      rankedPrecedents,
       clampPrecedentsCap(input.precedentsCap),
     ),
     appendJournalSection(lines, "decisions:", input.decisions ?? [], BRIEF_MAX_DECISIONS),
@@ -334,21 +356,19 @@ export function buildBrief(input: BriefInput): string {
     ),
   ];
   const hiddenEntries = sections.reduce((sum, info) => sum + info.hidden, 0);
-  const truncatedEntries = sections.some((info) => info.truncated);
+  let truncatedEntries = sections.some((info) => info.truncated) || intentTruncated;
   const recalled = selectTaskRecall(
     input.task ?? "",
     input.recallPool ?? [],
-    visibleJournalText(
-      rankPrecedents(input.task ?? "", input.precedents ?? []).slice(0, clampPrecedentsCap(input.precedentsCap)),
-      input.decisions ?? [],
-      input.corrections,
-    ),
+    visibleJournalText(precedentsShown, input.decisions ?? [], input.corrections),
   );
   if (recalled.length > 0) {
     lines.push("recall:");
     for (const entry of recalled) {
       const full = normalizeOneLine(entry.text, 10_000);
       const shown = trunc(full, AGENT_NOTE_DISPLAY_MAX);
+      // Same rule as every other section: a cut line is announced, not silent.
+      if (shown !== full) truncatedEntries = true;
       const safeTags = [
         ...new Set((Array.isArray(entry.tags) ? entry.tags : []).map((tag) => truncLine(tag, 40)).filter(Boolean)),
       ].slice(0, 8);

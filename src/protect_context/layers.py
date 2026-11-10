@@ -13,20 +13,40 @@ owner-only surface, created by `contract add --global` or by hand.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
+
+from dotenv import find_dotenv, load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 USER_DIR_ENV = "PC_USER_DIR"
 USER_DIR_NAME = "protect-context"
 
 
+class _LayerEnv(BaseSettings):
+    """Environment that selects the personal layer (SPEC §2 precedence).
+
+    pydantic-settings reads PC_USER_DIR and XDG_CONFIG_HOME case-insensitively,
+    so the documented names are the model field names and no manual environ
+    lookup is needed.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+
+    pc_user_dir: str = ""
+    xdg_config_home: str = ""
+
+
 def user_dir() -> Path:
     """Personal layer directory: PC_USER_DIR, else $XDG_CONFIG_HOME, else ~/.config."""
-    override = os.environ.get(USER_DIR_ENV, "").strip()
+    # A project .env may set PC_USER_DIR; real environment variables always win
+    # (override=False), so a committed file can never hijack a shell setting.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    env = _LayerEnv()
+    override = env.pc_user_dir.strip()
     if override:
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    xdg = env.xdg_config_home.strip()
     base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
     return base / USER_DIR_NAME
 

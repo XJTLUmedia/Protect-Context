@@ -7,6 +7,8 @@ import { join } from "node:path";
 import {
   LIMIT_MAX,
   RecallError,
+  bm25Term,
+  idfFor,
   renderRecall,
   searchRows,
   searchStore,
@@ -44,20 +46,172 @@ test("recall: strength then recency, with agent provenance", () => {
   const result = searchRows(journal, evidence, { query: "alpha" });
   assert.equal(result.scanned, 5);
   assert.equal(result.matched, 4);
+  // BM25 ranks by term score, not by row kind: the two-word journal note wins,
+  // the short command row beats the longer decision row, and a row that only
+  // mentions "alpha" in its digest comes last.
   assert.deepEqual(
     result.hits.map((hit) => `${hit.provenance}:${hit.kind}`),
-    ["agent:note", "trusted:decision", "trusted:evidence", "trusted:evidence"],
+    ["agent:note", "trusted:evidence", "trusted:decision", "trusted:evidence"],
   );
-  assert.equal(result.hits[2]?.evidenceId, "ev-0007");
-  assert.ok((result.hits[2]?.strength ?? 0) > (result.hits[3]?.strength ?? 0));
-  assert.equal(result.hits[0]?.strength, result.hits[1]?.strength);
-  assert.ok((result.hits[0]?.recency ?? 0) > (result.hits[1]?.recency ?? 0));
+  assert.equal(result.hits[0]?.text, "alpha mentioned");
+  assert.equal(result.hits[1]?.evidenceId, "ev-0007");
+  assert.ok((result.hits[1]?.strength ?? 0) > (result.hits[3]?.strength ?? 0));
+  const strengths = result.hits.map((hit) => hit.strength);
+  assert.deepEqual(strengths, [...strengths].sort((a, b) => b - a), "ranked by strength, descending");
+  // Pinned: tests/test_recall.py asserts the same four numbers.
+  assert.deepEqual(strengths, [512, 447, 426, 235]);
   const rendered = renderRecall(result);
   assert.match(rendered, /agent · note/);
   assert.match(rendered, /trusted · decision/);
   assert.match(rendered, /ev-0007/);
   assert.match(rendered, /exit 1/);
   assert.match(rendered.split("\n").at(-1) ?? "", /^Nudge:.*unverified/);
+});
+
+test("recall: BM25 arithmetic is pinned for the Python mirror", () => {
+  // The ranking numbers are a cross-runtime contract. tests/test_recall.py
+  // asserts these exact values. The two hosts read the same journal, so a score
+  // that drifts here would rank the owner's journal differently depending on
+  // which one asked.
+  const idfCases: Array<[number, number, number]> = [
+    [1, 7, 1674],
+    [2, 7, 1163],
+    [3, 7, 827],
+    [7, 7, 65],
+    [1, 100, 4210],
+    [50, 100, 693],
+    [100, 100, 5],
+    [0, 5, 0],
+  ];
+  for (const [df, total, expected] of idfCases) {
+    assert.equal(idfFor(df, total), expected, `idf(${df}, ${total})`);
+  }
+  const termCases: Array<[number, number, number, number, number]> = [
+    [1674, 3, 5, 6, 2911],
+    [74, 3, 5, 6, 128],
+    [1000, 2, 2, 6, 1818],
+    [1674, 12, 60, 6, 2125],
+    [500, 1, 3, 6, 645],
+  ];
+  for (const [idf, tf, length, average, expected] of termCases) {
+    assert.equal(bm25Term(idf, tf, length, average), expected, `bm25(${idf}, ${tf}, ${length}, ${average})`);
+  }
+});
+
+test("recall: a long query widens to one shared term and says so", () => {
+  // The hard floor returned nothing at all when a five-word question shared a
+  // single word. The widening pass answers it, but flags the weaker evidence
+  // instead of presenting it as a full match.
+  const journal = [
+    { ts: "t1", type: "note", text: "the ledger", tags: [] },
+    { ts: "t2", type: "note", text: "unrelated chatter about tests", tags: [] },
+  ];
+  const result = searchRows(journal, [], { query: "explain the ledger rotation policy in detail" });
+  assert.equal(result.widened, true);
+  assert.deepEqual(result.hits.map((hit) => hit.text), ["the ledger"]);
+  assert.match(renderRecall(result), /Widened/);
+});
+
+test("recall: a query that matches two words is never widened", () => {
+  // Widening must not run when the strict pass already answered: this is the
+  // precision the floor was protecting in the first place.
+  const journal = [
+    { ts: "t1", type: "note", text: "owner prefers broad fixes over docs", tags: [] },
+    { ts: "t2", type: "note", text: "the owner", tags: [] },
+  ];
+  const result = searchRows(journal, [], {
+    query: "what did the owner say about tests and docs and release",
+  });
+  assert.equal(result.widened, false);
+  assert.deepEqual(result.hits.map((hit) => hit.text), ["owner prefers broad fixes over docs"]);
+  assert.doesNotMatch(renderRecall(result), /Widened/);
+});
+
+test("recall: the widening pass still respects type and tag filters", () => {
+  const journal = [
+    { ts: "t1", type: "note", text: "the ledger", tags: ["other"] },
+    { ts: "t2", type: "risk", text: "ledger corruption risk", tags: ["ledger"] },
+  ];
+  const query = "explain the ledger rotation policy in detail";
+  assert.deepEqual(searchRows(journal, [], { query, type: "decision" }).hits, []);
+  assert.deepEqual(
+    searchRows(journal, [], { query, tags: ["ledger"] }).hits.map((hit) => hit.text),
+    ["ledger corruption risk"],
+  );
+});
+
+test("recall: a reused hint outranks an equivalent one-shot", () => {
+  const events: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < 3; index += 1) {
+    events.push({ ts: `t${index}`, session: "s", kind: "tool_call", tool: "bash", cmd: "rsync a b" });
+  }
+  events.push({ ts: "t9", session: "s", kind: "tool_call", tool: "bash", cmd: "rsync c d" });
+  const result = searchRows([], [], { query: "rsync" }, events);
+  assert.deepEqual(result.hits.map((hit) => hit.cmd), ["rsync a b", "rsync c d"]);
+  assert.equal(result.hits[0]?.uses, 3);
+  assert.ok((result.hits[0]?.strength ?? 0) > (result.hits[1]?.strength ?? 0));
+});
+
+test("recall: the reinforcement boost is capped", () => {
+  // A row reused a hundred times must not buy an unbounded advantage.
+  const journal = [
+    { ts: "t1", type: "note", text: "alpha ledger note one", tags: [], uses: 8 },
+    { ts: "t2", type: "note", text: "alpha ledger note two", tags: [], uses: 100 },
+  ];
+  const result = searchRows(journal, [], { query: "alpha" });
+  assert.equal(result.hits[0]?.strength, result.hits[1]?.strength);
+});
+
+test("recall: relevance still beats reinforcement", () => {
+  // The boost settles near-ties; it may never outvote a genuinely better match.
+  const journal = [
+    { ts: "t1", type: "note", text: `alpha ${"filler ".repeat(40)}`, tags: [], uses: 100 },
+    { ts: "t2", type: "note", text: "alpha ledger", tags: [], uses: 0 },
+  ];
+  const result = searchRows(journal, [], { query: "alpha ledger" });
+  assert.equal(result.hits[0]?.text, "alpha ledger");
+  assert.ok((result.hits[0]?.strength ?? 0) > (result.hits[1]?.strength ?? 0));
+});
+
+test("recall: a journal row keeps its recorded reuse count", () => {
+  // Regression: asJournal() used to drop `uses`, so a row that recorded its own
+  // reuse counted as never reused.
+  const journal = [{ ts: "t1", type: "note", text: "owned it", tags: [], uses: 4 }];
+  const result = searchRows(journal, [], { query: "owned" });
+  assert.equal(result.hits[0]?.uses, 4);
+  // A non-integer or negative count is not a count.
+  const bad = searchRows([{ ts: "t1", type: "note", text: "owned it", tags: [], uses: "4" }], [], {
+    query: "owned",
+  });
+  assert.equal(bad.hits[0]?.uses, 0);
+  const negative = searchRows([{ ts: "t1", type: "note", text: "owned it", tags: [], uses: -3 }], [], {
+    query: "owned",
+  });
+  assert.equal(negative.hits[0]?.uses, 0);
+});
+
+test("recall: equal strength breaks the tie on recency", () => {
+  // Two rows of identical length and weight score the same, so the newer one
+  // must rank first.
+  const rows = [
+    { ts: "2026-01-01T00:00:00.000Z", type: "note", text: "alpha ledger note one", tags: [] },
+    { ts: "2026-02-01T00:00:00.000Z", type: "note", text: "alpha ledger note two", tags: [] },
+  ];
+  const result = searchRows(rows, [], { query: "alpha" });
+  assert.equal(result.hits[0]?.strength, result.hits[1]?.strength);
+  assert.ok((result.hits[0]?.recency ?? 0) > (result.hits[1]?.recency ?? 0));
+  assert.match(result.hits[0]?.text ?? "", /note two/);
+});
+
+test("recall: a verbose row does not outrank a precise one", () => {
+  // The measured length bias: a 60-word filler row used to beat a precise
+  // five-word row because the old score was an unbounded sum of weights.
+  const rows = [
+    { ts: "t1", type: "decision", text: "rotation keeps three segments", tags: [] },
+    { ts: "t2", type: "note", text: `rotation ${"filler ".repeat(60)}`, tags: [] },
+  ];
+  const result = searchRows(rows, [], { query: "rotation" });
+  assert.equal(result.hits[0]?.text, "rotation keeps three segments");
 });
 
 test("recall: keywords rank by match count and a tag is a searchable synonym", () => {
@@ -256,6 +410,32 @@ test("recall: a keyword must start a word", () => {
     hits.hits.map((hit) => hit.text),
     ["the old policy is gone"],
   );
+});
+
+test("recall: an inflected query reaches the row about another form", () => {
+  // Word-start matching was one-way, so every one of these returned nothing.
+  const journal = [
+    { ts: "t1", type: "decision", text: "The retrieval path walks every row.", tags: [] },
+    { ts: "t2", type: "decision", text: "Every decision is journalled.", tags: [] },
+  ];
+  for (const query of ["retrieving", "retrieval", "retrieved"]) {
+    const hits = searchRows(journal, [], { query }).hits;
+    assert.ok(hits.length > 0, query);
+    assert.ok(hits[0]?.text.includes("retrieval"), query);
+  }
+  assert.equal(searchRows(journal, [], { query: "decisions" }).matched, 1);
+  assert.equal(searchRows(journal, [], { query: "journalling" }).matched, 1);
+});
+
+test("recall: stemming does not reintroduce mid-word noise", () => {
+  // A stem must be a whole token, never a substring: "arch" may not reach
+  // "search" and "old" may not reach "threshold" just because stems exist.
+  const rows = [
+    { ts: "1", type: "note", text: "raise the threshold", tags: [] },
+    { ts: "2", type: "note", text: "search the index", tags: [] },
+  ];
+  assert.equal(searchRows(rows, [], { query: "old" }).matched, 0);
+  assert.equal(searchRows(rows, [], { query: "arch" }).matched, 0);
 });
 
 test("recall: a read tool leaves a reusable file hint", () => {

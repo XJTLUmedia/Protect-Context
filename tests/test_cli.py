@@ -6,13 +6,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from protect_context import journal, store, verify
+from protect_context import contract, journal, store, verify
 from protect_context.cli import main
 
 
 def _fail(cmd, session="test-session"):
+    # A real timestamp keeps the streak inside its reset window (loops expire
+    # an idle streak), so the brake still fires as these tests intend.
     return {"kind": "tool_result", "tool": "bash", "ok": False, "cmd": cmd, "exit": 1,
-            "session": session}
+            "session": session, "ts": store.now_ts()}
 
 
 def _git(*args):
@@ -268,6 +270,28 @@ def test_verify_accepts_command_words_and_flags(capsys):
     assert "flagged" in capsys.readouterr().out
 
 
+def test_verify_strips_an_explicit_command_separator(capsys):
+    """`verify -- <cmd>` must not run the literal string "-- <cmd>".
+
+    argparse's REMAINDER keeps the separator, so the shell used to exit 2 and a
+    FAIL row was recorded for a command that passes (found 2026-11-10).
+    """
+    assert main(["verify", "--", "true"]) == 0
+    out = capsys.readouterr().out
+    assert "cmd: --" not in out
+    assert "cmd: true" in out
+    assert verify.count() == 1
+
+
+def test_verify_warns_when_timeout_is_written_after_the_command(capsys):
+    # The flag becomes part of the command; the help says so, and a bogus FAIL
+    # recorded under a real-looking command is worse than a hint.
+    main(["verify", "echo", "hi", "--timeout", "5"])
+    out = capsys.readouterr().out
+    assert "note: --timeout after the command" in out
+    assert "cmd: echo hi --timeout 5" in out
+
+
 def test_verify_without_a_command_explains_usage(capsys):
     assert main(["verify"]) == 2
     out = capsys.readouterr().out
@@ -322,6 +346,17 @@ def test_contract_add_warns_past_brief_cap(capsys):
     assert "highest-priority owner/seed" in out
     assert "Nudge:" in out
     assert out.rstrip().splitlines()[-1].startswith("Nudge:")
+
+
+def test_contract_add_announces_truncation(capsys):
+    """A constraint cut to TEXT_CAP loses its operative tail, and unlike a
+    journal row it is re-injected into every session, so the cut must be said
+    out loud (found 2026-11-10: the ack printed only "added <id>")."""
+    assert main(["contract", "add", "x" * 900]) == 0
+    out = capsys.readouterr().out
+    assert "note: text truncated 900 -> 500 chars" in out
+    rows = contract.load()
+    assert len(rows[-1]["text"]) == 500
 
 
 # ---- module entry -------------------------------------------------------------

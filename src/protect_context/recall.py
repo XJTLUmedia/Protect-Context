@@ -5,25 +5,34 @@ segments are concatenated oldest-first — the same window every other reader
 sees (SPEC §2). Segments already dropped by rotation are not searched.
 
 No embeddings, no network, and no extra index. Filters combine with AND.
-Keywords rank by how many of them hit, because a query is a paraphrase rather
-than an exact string: common English stopwords are dropped, and a query of
-three or more keywords needs two real matches so one shared word cannot flood
-the list. Each keyword matches across ``text``, ``cmd``, and ``digest``; a
-keyword that is itself an evidence id (``ev-NNNN``) also matches that id. Tags
-are exact, case-insensitive, and AND: every requested tag must be present.
-Evidence rows have no tags, so a tag filter excludes them.
+
+A query is a paraphrase, not a string, so matching is word-start **or equal
+stem**: ``retrieving`` reaches a row about ``retrieval``, while ``arch`` still
+never reaches ``search``. Common English stopwords are dropped. Each keyword
+matches across ``text``, ``cmd``, and ``digest``; a keyword that is itself an
+evidence id (``ev-NNNN``) also matches that id. Tags are exact, case-insensitive,
+and AND: every requested tag must be present. Evidence rows have no tags, so a
+tag filter excludes them.
+
+Rows score by BM25 (``k1=1.5``, ``b=0.75``, Lucene IDF) in integer thousandths:
+term frequency saturates, and a row is normalised by its length against the
+corpus average so a verbose row cannot win on volume alone. A query of three or
+more keywords must still share two words, but when nothing matches at that floor
+the search widens once to a single shared term and reports ``widened``.
 
 When a query is given, past bash commands from the events ledger join the
 corpus as ``command`` rows (successful calls only, deduplicated by fingerprint
 and skipped when the same command is already in the evidence ledger), so
 "copy this to that folder" reaches the command that did it last time.
 
-Ranking is match strength, then recency. Recency is the stored timestamp
-string (writers use ISO-8601, newest last), with read order as a tiebreak.
-Journal hits tagged ``agent`` stay unverified; every other journal hit and
-every evidence row is trusted.
+Ranking is match strength, then recency, then a bounded boost from a row's
+recorded reuse count. The displayed page collapses near-duplicates
+(``dedup``), so restatements of one entry cannot fill it. Journal hits tagged
+``agent`` stay unverified; every other journal hit and every evidence row is
+trusted.
 
-Keep the weights and filter rules aligned with ``extension/lib/recall.ts``.
+Keep the weights, constants, and filter rules aligned with
+``extension/lib/recall.ts``.
 """
 
 from __future__ import annotations
@@ -31,7 +40,10 @@ from __future__ import annotations
 import math
 import re
 
-from . import store
+from cachetools import LRUCache
+
+from . import dedup, store
+from . import stem as stemmer
 
 RECALL_TYPES = ("decision", "correction", "risk", "note", "evidence")
 LIMIT_DEFAULT = 5
@@ -46,6 +58,19 @@ DIGEST_WEIGHT = 1
 ID_WEIGHT = 4
 CMD_EXACT_WEIGHT = 4
 CMD_SUB_WEIGHT = 1
+
+# Observed-reuse reinforcement. A hint that already solved this three times is
+# worth more than one that was tried once, but the boost is capped and small, so
+# it can settle a near-tie and never outvote a genuinely better lexical match.
+# This is not ACT-R base-level activation: the ledger stores a count, not the
+# dates of each reuse, so there is no history to decay.
+USES_BONUS_STEP = 10
+USES_BONUS_CAP = 8
+
+# BM25 saturation (k1) and length normalisation (b), in thousandths so the
+# arithmetic stays integer and the TypeScript mirror agrees to the unit.
+K1_MILLI = 1500
+B_MILLI = 750
 
 _EV_ID = re.compile(r"ev-(\d+)$", re.IGNORECASE)
 _AGENT_TAG = "agent"
@@ -231,6 +256,9 @@ def _as_journal(row: dict) -> dict | None:
         "evidence_id": None,
         "exit_code": None,
         "provenance": "agent" if _is_agent(tags) else "trusted",
+        # Carried through rather than dropped: a journal row that records its own
+        # reuse count used to rank as if it had never been reused at all.
+        "uses": _as_count(row.get("uses")),
     }
 
 
@@ -406,6 +434,35 @@ def _canonical_keys(keywords: list[str]) -> list[str | None]:
     return [canonical_evidence_id(keyword) for keyword in keywords]
 
 
+# Stem sets are pure functions of a field string, so they are memoised across
+# rows and searches. The cap bounds a long-lived process; the retained window is
+# far smaller than this, and clearing only costs one re-tokenise.
+_STEM_CACHE_MAX = 4096
+# LRU rather than "clear everything on overflow": a long session would
+# otherwise re-tokenise the whole corpus every 4096 distinct strings.
+_stem_cache: LRUCache = LRUCache(maxsize=_STEM_CACHE_MAX)
+
+
+def _stems(text: str) -> frozenset[str]:
+    cached = _stem_cache.get(text)
+    if cached is None:
+        cached = stemmer.stems(text)
+        _stem_cache[text] = cached
+    return cached
+
+
+def term_hit(haystack: str, keyword: str, keyword_stem: str) -> bool:
+    """True when ``keyword`` starts a word in ``haystack``, or shares its stem.
+
+    The word-start rule alone made morphology one-way: a query for ``retrieving``
+    found nothing in a row about ``retrieval``. Adding stem equality keeps the
+    mid-word guard (``arch`` still misses ``search``) while joining inflections.
+    """
+    if word_hit(haystack, keyword):
+        return True
+    return keyword_stem != "" and keyword_stem in _stems(haystack)
+
+
 def word_hit(haystack: str, keyword: str) -> bool:
     """True when ``keyword`` starts a word in ``haystack``.
 
@@ -427,16 +484,16 @@ def word_hit(haystack: str, keyword: str) -> bool:
         start = idx + 1
 
 
-def _raw_hit(keyword: str, canonical: str | None, row: dict) -> int:
+def _raw_hit(keyword: str, keyword_stem: str, canonical: str | None, row: dict) -> int:
     """Unweighted hit strength for one keyword against one row."""
     hit = 0
-    if word_hit(row["text"], keyword):
+    if term_hit(row["text"], keyword, keyword_stem):
         hit += TEXT_WEIGHT
-    if any(word_hit(tag, keyword) for tag in row["tags"]):
+    if any(term_hit(tag, keyword, keyword_stem) for tag in row["tags"]):
         hit += TAG_WEIGHT
-    if word_hit(row["cmd"], keyword):
+    if term_hit(row["cmd"], keyword, keyword_stem):
         hit += CMD_WEIGHT
-    if word_hit(row["digest"], keyword):
+    if term_hit(row["digest"], keyword, keyword_stem):
         hit += DIGEST_WEIGHT
     if canonical is not None and canonical == row["evidence_id"]:
         hit += ID_WEIGHT
@@ -444,27 +501,73 @@ def _raw_hit(keyword: str, canonical: str | None, row: dict) -> int:
 
 
 def _idf(df: int, total: int) -> int:
-    """Rarity multiplier in thousandths, clamped to [1x, 8x].
+    """BM25 inverse document frequency in thousandths.
 
-    A word in every row ("owner") is worth no more than its base weight; a word
-    in one row of a hundred is worth up to 8x. Integer math only, so the
-    TypeScript mirror computes bit-identical values.
+    ``ln(1 + (N - df + 0.5) / (df + 0.5))`` is the Lucene form: it is always
+    non-negative, so a word present in every row ("owner") scores near zero
+    instead of demanding an arbitrary clamp, and a word in one row of a hundred
+    dominates the query. The old rule (``N/df`` clamped to [1x, 8x]) could not
+    tell a word in 2 rows from a word in 12 — both hit the ceiling.
+
+    Values are rounded to integer thousandths so the TypeScript mirror computes
+    the same number: ``floor(x * 1000 + 0.5)`` is a rounding rule both runtimes
+    share, unlike banker's rounding.
     """
-    if df <= 0:
-        return 1000
-    scaled = (total * 1000) // df
-    return max(1000, min(scaled, 8000))
+    if df <= 0 or total <= 0:
+        return 0
+    value = math.log(1.0 + (total - df + 0.5) / (df + 0.5))
+    return math.floor(value * 1000.0 + 0.5)
+
+
+def _bm25_term(idf_milli: int, tf: int, length: int, average: int) -> int:
+    """One BM25 term score, integer-only.
+
+    ``idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / average))`` in
+    thousandths. Saturation is what fixes the measured length bias: without a
+    ``k1`` ceiling a 60-word filler row outranked a precise 5-word row because
+    the old score was a plain sum of weights that never stopped growing.
+    """
+    if idf_milli <= 0 or tf <= 0 or average <= 0:
+        return 0
+    # (1 - b + b * length / average) in thousandths.
+    norm = (1000 - B_MILLI) + (B_MILLI * length) // average
+    denominator = tf * 1000 + (K1_MILLI * norm) // 1000
+    if denominator <= 0:
+        return 0
+    return (idf_milli * tf * (1000 + K1_MILLI)) // denominator
+
+
+def _uses_bonus(value: object) -> int:
+    """Bounded reinforcement from how often a row was reused."""
+    return min(_as_count(value), USES_BONUS_CAP) * USES_BONUS_STEP
+
+
+def _doc_length(row: dict) -> int:
+    """Searchable length of a row, for BM25's length normalisation."""
+    total = stemmer.count_tokens(row["text"]) + stemmer.count_tokens(row["cmd"])
+    total += stemmer.count_tokens(row["digest"])
+    for tag in row["tags"]:
+        total += stemmer.count_tokens(tag)
+    return total
 
 
 def _keyword_score(
-    keywords: list[str], canon_ids: list[str | None], row: dict, idf: list[int]
+    keywords: list[str],
+    kw_stems: list[str],
+    canon_ids: list[str | None],
+    row: dict,
+    idf: list[int],
+    length: int,
+    average: int,
+    floor: int | None = None,
 ) -> int | None:
-    """Rarity-weighted partial-match score, or None when the row is too weak.
+    """BM25 partial-match score, or None when the row is too weak.
 
-    Every hit adds weight (idf-adjusted) instead of casting an all-or-nothing
-    vote, so a paraphrase still finds the entry that answers most of it. The
-    floor keeps precision: a three-or-more-word query must share at least two
-    words.
+    Every hit adds a saturated, length-normalised term score instead of casting
+    an all-or-nothing vote, so a paraphrase still finds the entry that answers
+    most of it. The floor keeps precision: a three-or-more-word query must share
+    at least two words. ``floor`` overrides that rule for the widening pass, where
+    a single shared term is all the query has left.
     """
     if not keywords:
         return 0
@@ -472,14 +575,15 @@ def _keyword_score(
     hits = 0
     tag_hit = False
     for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
-        raw = _raw_hit(keyword, canonical, row)
+        raw = _raw_hit(keyword, kw_stems[index], canonical, row)
         if not raw:
             continue
         hits += 1
-        if any(word_hit(tag, keyword) for tag in row["tags"]):
+        if any(term_hit(tag, keyword, kw_stems[index]) for tag in row["tags"]):
             tag_hit = True
-        score += (raw * idf[index]) // 1000
-    floor = 1 if len(keywords) < _MULTI_MATCH_FROM else _MULTI_MATCH_FLOOR
+        score += _bm25_term(idf[index], raw, length, average)
+    if floor is None:
+        floor = 1 if len(keywords) < _MULTI_MATCH_FROM else _MULTI_MATCH_FLOOR
     # A tag is a synonym the owner wrote on purpose, so one tag match is a
     # deliberate signal and beats the word-count floor that stops stray matches.
     if hits < floor and not tag_hit:
@@ -488,13 +592,13 @@ def _keyword_score(
 
 
 def _document_frequencies(
-    keywords: list[str], canon_ids: list[str | None], corpus: list[dict]
+    keywords: list[str], kw_stems: list[str], canon_ids: list[str | None], corpus: list[dict]
 ) -> list[int]:
     """How many corpus rows each keyword reaches (the idf input)."""
     counts = [0] * len(keywords)
     for row in corpus:
         for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
-            if _raw_hit(keyword, canonical, row):
+            if _raw_hit(keyword, kw_stems[index], canonical, row):
                 counts[index] += 1
     return counts
 
@@ -582,10 +686,18 @@ class Hit:
 
 
 class RecallResult:
-    def __init__(self, hits: list[Hit], scanned: int, matched: int) -> None:
+    """Ranked hits plus the window size and whether the query was widened."""
+
+    def __init__(
+        self, hits: list[Hit], scanned: int, matched: int, widened: bool = False
+    ) -> None:
         self.hits = hits
         self.scanned = scanned
         self.matched = matched
+        # True when the strict pass matched nothing and the search relaxed to a
+        # single shared term. The hits are then weaker evidence, so the caller is
+        # told rather than left to assume precision it did not get.
+        self.widened = widened
 
 
 def search(
@@ -610,6 +722,7 @@ def search(
     wanted_id = _validate_evidence_id(evidence_id)
     bounded = bounded_limit(limit)
     keywords = _keywords(query)
+    kw_stems = [stemmer.stem(keyword) for keyword in keywords]
     canon_ids = _canonical_keys(keywords)
     wanted_tags = _requested_tags(tags)
     cmd_filter = _blank_to_none(cmd)
@@ -652,26 +765,48 @@ def search(
             known.add(store.fingerprint(row["cmd"]))
             corpus.append(row)
 
-    idf = [_idf(df, len(corpus)) for df in _document_frequencies(keywords, canon_ids, corpus)]
-    matched: list[tuple[dict, int, int]] = []
-    for seq, row in enumerate(corpus):
-        if kind is not None and row["kind"] != kind:
-            continue
-        if wanted_id is not None and row["evidence_id"] != wanted_id:
-            continue
-        if not _matches_tags(wanted_tags, row):
-            continue
-        bonus = _cmd_bonus(cmd_filter, row)
-        if bonus is None:
-            continue
-        keyword_score = _keyword_score(keywords, canon_ids, row, idf)
-        if keyword_score is None:
-            continue
-        if row["kind"] in ("command", "file"):
-            keyword_score //= 2
-            if row.get("last_ok") is False:
+    idf = [
+        _idf(df, len(corpus))
+        for df in _document_frequencies(keywords, kw_stems, canon_ids, corpus)
+    ]
+    # BM25 normalises by how long a row is relative to the corpus average, so a
+    # verbose row no longer wins just by holding more chances to match.
+    lengths = [_doc_length(row) for row in corpus]
+    average = max(1, sum(lengths) // len(lengths)) if lengths else 1
+
+    def collect(floor: int | None) -> list[tuple[dict, int, int]]:
+        found: list[tuple[dict, int, int]] = []
+        for seq, row in enumerate(corpus):
+            if kind is not None and row["kind"] != kind:
+                continue
+            if wanted_id is not None and row["evidence_id"] != wanted_id:
+                continue
+            if not _matches_tags(wanted_tags, row):
+                continue
+            bonus = _cmd_bonus(cmd_filter, row)
+            if bonus is None:
+                continue
+            keyword_score = _keyword_score(
+                keywords, kw_stems, canon_ids, row, idf, lengths[seq], average, floor
+            )
+            if keyword_score is None:
+                continue
+            if row["kind"] in ("command", "file"):
                 keyword_score //= 2
-        matched.append((row, keyword_score + bonus, seq))
+                if row.get("last_ok") is False:
+                    keyword_score //= 2
+            found.append((row, keyword_score + bonus + _uses_bonus(row.get("uses")), seq))
+        return found
+
+    matched = collect(None)
+    widened = False
+    # The widening ladder: when a long query shares two words with nothing, one
+    # shared term still deserves an answer. The strict pass ran first, so this
+    # can only add rows to an empty list — precision where it exists, recall
+    # where it does not.
+    if not matched and len(keywords) >= _MULTI_MATCH_FROM:
+        matched = collect(1)
+        widened = bool(matched)
 
     matched.sort(key=lambda item: (item[0]["ts"], item[2]))
     ranked = [
@@ -679,22 +814,30 @@ def search(
         for recency, (row, strength, _seq) in enumerate(matched)
     ]
     ranked.sort(key=lambda hit: (hit.strength, hit.recency), reverse=True)
-    shown = ranked[:bounded] if bounded else []
-    return RecallResult(shown, scanned=len(corpus), matched=len(ranked))
+    # Collapse rewrites of one entry before the page is cut, so five restatements
+    # of a decision cannot fill the answer. `matched` still counts every ranked
+    # row; only the displayed page is deduped.
+    page = dedup.suppress([hit.text or hit.cmd for hit in ranked], bounded) if bounded else []
+    shown = [ranked[index] for index in page]
+    return RecallResult(shown, scanned=len(corpus), matched=len(ranked), widened=widened)
 
 
-def _nudge(hits: list[Hit]) -> str:
+def _nudge(hits: list[Hit], widened: bool = False) -> str:
     if not hits:
         return (
             "Nudge: nothing matched in the retained window — "
             "broaden the query or drop a filter."
         )
+    prefix = ""
+    if widened:
+        prefix = "Widened: no entry shared two words, so these share one term. "
     if any(hit.provenance == "agent" for hit in hits):
         return (
-            "Nudge: agent hits stay unverified — confirm them before acting; "
+            prefix
+            + "Nudge: agent hits stay unverified — confirm them before acting; "
             "cite evidence ids."
         )
-    return "Nudge: cite evidence ids and re-read trusted hits before acting on them."
+    return prefix + "Nudge: cite evidence ids and re-read trusted hits before acting on them."
 
 
 def render(result: RecallResult) -> str:
@@ -709,5 +852,5 @@ def render(result: RecallResult) -> str:
     lines = [header]
     for index, hit in enumerate(result.hits, start=1):
         lines.append(hit.line(index))
-    lines.append(_nudge(result.hits))
+    lines.append(_nudge(result.hits, result.widened))
     return "\n".join(lines)

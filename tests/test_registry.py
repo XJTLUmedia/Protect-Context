@@ -19,6 +19,13 @@ def _project_field(name):
     return m.group(1)
 
 
+def _declared_dependencies():
+    """`[project].dependencies`, single- or multi-line (tomllib needs 3.11)."""
+    block = re.search(r"^dependencies = \[(.*?)\]", PYPROJECT, re.MULTILINE | re.DOTALL)
+    assert block, "dependencies missing from [project]"
+    return re.findall(r'"([^"]+)"', block.group(1))
+
+
 def test_server_json_versions_match_the_package():
     assert SERVER["version"] == _project_field("version")
     (package,) = SERVER["packages"]
@@ -117,6 +124,35 @@ def test_registry_workflow_publishes_with_oidc_and_no_secrets():
     assert "twine" not in text
 
 
+def test_check_workflow_runs_both_suites_and_their_prerequisites():
+    """The only enforcement of "green before shipping" (SPEC §7) is this
+    workflow, so a dropped job or prerequisite would go unnoticed.
+
+    Found 2026-11-10 by running the extension job in a bare container: it needs
+    `git` and `python3`, and three cross-runtime tests import `protect_context`
+    from the child interpreter, so a bare interpreter is not enough either.
+    """
+    text = (ROOT / ".github/workflows/check.yml").read_text()
+    assert "npm run check" in text, "extension suite"
+    assert "pytest -q" in text, "python suite"
+    assert 'node-version: "22"' in text
+    assert '"3.10", "3.11", "3.12", "3.13"' in text, "python matrix matches the classifiers"
+    # Prerequisites for the extension job's cross-runtime tests.
+    assert "pip install -e ." in text, "cross-runtime tests import the package"
+    assert "pull_request" in text and "push" in text
+    # Supply-chain hardening: a movable action tag is an input to every run.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- uses: "):
+            continue
+        ref = stripped.split("uses: ", 1)[1].split()[0]
+        action, _, pin = ref.partition("@")
+        assert action.startswith("actions/"), action
+        assert re.fullmatch(r"[0-9a-f]{40}", pin), f"{action} must be pinned by commit SHA"
+    assert "permissions:" in text and "contents: read" in text
+    assert text.count("persist-credentials: false") == 2
+
+
 def test_root_mcp_and_glama_listing_files():
     mcp = json.loads((ROOT / ".mcp.json").read_text())
     server = mcp["mcpServers"]["protect-context"]
@@ -124,3 +160,79 @@ def test_root_mcp_and_glama_listing_files():
     assert server["args"] == ["protect-context", "mcp"]
     glama = json.loads((ROOT / "glama.json").read_text())
     assert glama["maintainers"] == ["XJTLUmedia"]
+
+
+def test_one_version_everywhere():
+    """A release reads its version from six files; drift ships a package whose
+    --version disagrees with the registry entry (found 2026-11-10: 3.2.2 in
+    package.json and bin/pc.mjs, 3.2.1 everywhere else — and then again in
+    package-lock.json after the fix, which is why the lockfile is pinned too)."""
+    import protect_context
+
+    expected = _project_field("version")
+    assert protect_context.__version__ == expected, "__init__.__version__"
+    assert SERVER["version"] == expected, "server.json"
+    assert json.loads((ROOT / "package.json").read_text())["version"] == expected, "package.json"
+    # npm records the root version twice in the lockfile; `npm ci` tolerates a
+    # mismatch here, so only an explicit assertion keeps them honest.
+    lock = json.loads((ROOT / "package-lock.json").read_text())
+    assert lock["version"] == expected, "package-lock.json version"
+    assert lock["packages"][""]["version"] == expected, "package-lock.json packages[''].version"
+    bin_text = (ROOT / "bin" / "pc.mjs").read_text()
+    assert f'.version("{expected}")' in bin_text, "bin/pc.mjs"
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    assert f"## {expected}" in changelog, "CHANGELOG.md has a section for the shipped version"
+
+
+# Which distribution provides each third-party import the package uses.
+_IMPORT_TO_DIST = {
+    "cachetools": "cachetools",
+    "dotenv": "python-dotenv",
+    "fastmcp": "fastmcp",
+    "humanize": "humanize",
+    "mcp": "mcp",
+    "orjson": "orjson",
+    "pybreaker": "pybreaker",
+    "pydantic": "pydantic",
+    "pydantic_settings": "pydantic-settings",
+    "rich": "rich",
+    "tenacity": "tenacity",
+    "typer": "typer",
+}
+
+
+def test_every_third_party_import_is_declared():
+    """A wheel must declare what it imports.
+
+    Found 2026-11-10: `pip install protect-context` into a clean container left
+    `store.py` importing an undeclared `tenacity` and `layers.py` an undeclared
+    `dotenv`, so the package failed at import time — invisible from a dev venv
+    where both were installed by hand.
+    """
+    import ast
+    import sys
+
+    src = ROOT / "src" / "protect_context"
+    local = {p.stem for p in src.glob("*.py")} | {"protect_context"}
+    imported = set()
+    for path in src.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                top = name.split(".")[0]
+                if top not in sys.stdlib_module_names and top not in local:
+                    imported.add(top)
+
+    declared = {
+        re.split(r"[<>=!~\[]", dep, maxsplit=1)[0].strip().lower()
+        for dep in _declared_dependencies()
+    }
+    undeclared_imports = sorted(imported - set(_IMPORT_TO_DIST))
+    assert not undeclared_imports, f"add these to _IMPORT_TO_DIST: {undeclared_imports}"
+    missing = sorted({_IMPORT_TO_DIST[m] for m in imported} - declared)
+    assert not missing, f"imports without a declared dependency: {missing}"

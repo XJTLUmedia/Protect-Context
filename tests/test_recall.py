@@ -15,6 +15,153 @@ def _hit_kinds(result):
     return [(hit.provenance, hit.kind, hit.evidence_id, hit.text) for hit in result.hits]
 
 
+def test_bm25_arithmetic_is_pinned_for_the_typescript_mirror():
+    """The ranking numbers are a cross-runtime contract.
+
+    ``extension/test/recall.test.ts`` asserts these exact values. The two hosts
+    read the same journal, so a score that drifts here would rank the owner's
+    journal differently depending on which one asked.
+    """
+    assert [recall._idf(df, total) for df, total in [
+        (1, 7), (2, 7), (3, 7), (7, 7), (1, 100), (50, 100), (100, 100), (0, 5)
+    ]] == [1674, 1163, 827, 65, 4210, 693, 5, 0]
+    assert [recall._bm25_term(*case) for case in [
+        (1674, 3, 5, 6), (74, 3, 5, 6), (1000, 2, 2, 6), (1674, 12, 60, 6), (500, 1, 3, 6)
+    ]] == [2911, 128, 1818, 2125, 645]
+
+
+def test_a_long_query_widens_to_one_shared_term_and_says_so():
+    # The hard floor returned nothing at all when a five-word question shared a
+    # single word. The widening pass answers it, but flags the weaker evidence
+    # instead of presenting it as a full match.
+    journal = [
+        {"ts": "t1", "type": "note", "text": "the ledger", "tags": []},
+        {"ts": "t2", "type": "note", "text": "unrelated chatter about tests", "tags": []},
+    ]
+    result = recall.search(
+        "explain the ledger rotation policy in detail",
+        journal_rows=journal,
+        evidence_rows=[],
+    )
+    assert result.widened is True
+    assert [hit.text for hit in result.hits] == ["the ledger"]
+    assert "Widened" in recall.render(result)
+
+
+def test_a_query_that_matches_two_words_is_never_widened():
+    # Widening must not run when the strict pass already answered: this is the
+    # precision the floor was protecting in the first place.
+    journal = [
+        {"ts": "t1", "type": "note", "text": "owner prefers broad fixes over docs", "tags": []},
+        {"ts": "t2", "type": "note", "text": "the owner", "tags": []},
+    ]
+    result = recall.search(
+        "what did the owner say about tests and docs and release",
+        journal_rows=journal,
+        evidence_rows=[],
+    )
+    assert result.widened is False
+    assert [hit.text for hit in result.hits] == ["owner prefers broad fixes over docs"]
+    assert "Widened" not in recall.render(result)
+
+
+def test_the_widening_pass_respects_every_filter():
+    # A widened hit must still obey type/tag filters: widening is about the word
+    # floor, never about ignoring what the caller asked for.
+    journal = [
+        {"ts": "t1", "type": "note", "text": "the ledger", "tags": ["other"]},
+        {"ts": "t2", "type": "risk", "text": "ledger corruption risk", "tags": ["ledger"]},
+    ]
+    result = recall.search(
+        "explain the ledger rotation policy in detail",
+        type="decision",
+        journal_rows=journal,
+        evidence_rows=[],
+    )
+    assert result.hits == []
+    tagged = recall.search(
+        "explain the ledger rotation policy in detail",
+        tags=["ledger"],
+        journal_rows=journal,
+        evidence_rows=[],
+    )
+    assert [hit.text for hit in tagged.hits] == ["ledger corruption risk"]
+
+
+def test_a_reused_hint_outranks_an_equivalent_one_shot():
+    events = []
+    for index in range(3):
+        events.append(
+            {"ts": f"t{index}", "session": "s", "kind": "tool_call", "tool": "bash", "cmd": "rsync a b"}
+        )
+    events.append(
+        {"ts": "t9", "session": "s", "kind": "tool_call", "tool": "bash", "cmd": "rsync c d"}
+    )
+    result = recall.search("rsync", journal_rows=[], evidence_rows=[], event_rows=events)
+    assert [hit.cmd for hit in result.hits] == ["rsync a b", "rsync c d"]
+    assert result.hits[0].uses == 3
+    assert result.hits[0].strength > result.hits[1].strength
+
+
+def test_the_reinforcement_boost_is_capped():
+    # A row reused a hundred times must not buy an unbounded advantage.
+    journal = [
+        {"ts": "t1", "type": "note", "text": "alpha ledger note one", "tags": [], "uses": 8},
+        {"ts": "t2", "type": "note", "text": "alpha ledger note two", "tags": [], "uses": 100},
+    ]
+    result = recall.search("alpha", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].strength == result.hits[1].strength
+
+
+def test_relevance_still_beats_reinforcement():
+    # The boost settles near-ties; it may never outvote a genuinely better match.
+    journal = [
+        {"ts": "t1", "type": "note", "text": "alpha " + "filler " * 40, "tags": [], "uses": 100},
+        {"ts": "t2", "type": "note", "text": "alpha ledger", "tags": [], "uses": 0},
+    ]
+    result = recall.search("alpha ledger", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].text == "alpha ledger"
+    assert result.hits[0].strength > result.hits[1].strength
+
+
+def test_a_journal_row_keeps_its_recorded_reuse_count():
+    # Regression: _as_journal() used to drop "uses", so a row that recorded its
+    # own reuse counted as never reused.
+    journal = [{"ts": "t1", "type": "note", "text": "owned it", "tags": [], "uses": 4}]
+    result = recall.search("owned", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].uses == 4
+    # A non-integer count is not a count.
+    parsed = recall._as_journal({"type": "note", "text": "x", "uses": "4"})
+    assert parsed is not None and parsed["uses"] == 0
+    parsed_negative = recall._as_journal({"type": "note", "text": "x", "uses": -3})
+    assert parsed_negative is not None and parsed_negative["uses"] == 0
+
+
+def test_equal_strength_breaks_the_tie_on_recency():
+    # Two rows of identical length and weight score the same, so the newer one
+    # must rank first. This is the tiebreak the ranking now exposes only when the
+    # BM25 scores are actually equal.
+    journal = [
+        {"ts": "2026-01-01T00:00:00.000Z", "type": "note", "text": "alpha ledger note one", "tags": []},
+        {"ts": "2026-02-01T00:00:00.000Z", "type": "note", "text": "alpha ledger note two", "tags": []},
+    ]
+    result = recall.search("alpha", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].strength == result.hits[1].strength
+    assert result.hits[0].recency > result.hits[1].recency
+    assert "note two" in result.hits[0].text
+
+
+def test_a_verbose_row_does_not_outrank_a_precise_one():
+    # The measured length bias: a 60-word filler row used to beat a precise
+    # five-word row because the old score was an unbounded sum of weights.
+    journal = [
+        {"ts": "t1", "type": "decision", "text": "rotation keeps three segments", "tags": []},
+        {"ts": "t2", "type": "note", "text": "rotation " + "filler " * 60, "tags": []},
+    ]
+    result = recall.search("rotation", journal_rows=journal, evidence_rows=[])
+    assert result.hits[0].text == "rotation keeps three segments"
+
+
 def test_rank_strength_then_recency_and_keeps_provenance():
     journal = [
         {
@@ -55,18 +202,24 @@ def test_rank_strength_then_recency_and_keeps_provenance():
     result = recall.search("alpha", journal_rows=journal, evidence_rows=evidence)
     assert result.scanned == 5
     assert result.matched == 4
+    # BM25 ranks by term score, not by row kind: the two-word journal note wins,
+    # the short command row beats the longer decision row, and a row that only
+    # mentions "alpha" in its digest comes last.
     assert [hit.provenance + ":" + hit.kind for hit in result.hits] == [
         "agent:note",
-        "trusted:decision",
         "trusted:evidence",
+        "trusted:decision",
         "trusted:evidence",
     ]
     assert result.hits[0].text == "alpha mentioned"
-    assert result.hits[1].tags == ["ledger"]
-    assert result.hits[2].evidence_id == "ev-0007"
-    assert result.hits[2].strength > result.hits[3].strength
-    assert result.hits[0].strength == result.hits[1].strength
-    assert result.hits[0].recency > result.hits[1].recency
+    assert result.hits[2].tags == ["ledger"]
+    assert result.hits[1].evidence_id == "ev-0007"
+    assert result.hits[1].strength > result.hits[3].strength
+    assert [hit.strength for hit in result.hits] == sorted(
+        (hit.strength for hit in result.hits), reverse=True
+    ), "ranked by strength, descending"
+    # Pinned: the TypeScript mirror asserts the same four numbers.
+    assert [hit.strength for hit in result.hits] == [512, 447, 426, 235]
     rendered = recall.render(result)
     assert "agent · note" in rendered
     assert "trusted · decision" in rendered
@@ -180,7 +333,7 @@ def test_malformed_rows_are_skipped_and_controls_stay_one_line():
 def test_rotation_window_includes_segments_and_drops_the_overflow():
     journal = store.journal_path()
     journal.parent.mkdir(parents=True, exist_ok=True)
-    dropped = journal.with_name("journal.4.jsonl")
+    dropped = journal.with_name("journal.7.jsonl")
     rotated = journal.with_name("journal.1.jsonl")
     rotated.write_text(
         json.dumps({"ts": "t0", "type": "decision", "text": "rotated-marker", "tags": ["keep"]}) + "\n",
@@ -397,3 +550,28 @@ def test_a_read_tool_leaves_a_reusable_file_hint():
     assert "read · reuse" in hit.line(1)
     # The key is a path, never a shell command: it may not form a loop streak.
     assert loops.streaks(events, session="s") == []
+
+
+def test_inflected_query_reaches_the_row_about_another_form():
+    # Word-start matching was one-way, so every one of these returned nothing.
+    journal = [
+        {"ts": "t1", "type": "decision", "text": "The retrieval path walks every row.", "tags": []},
+        {"ts": "t2", "type": "decision", "text": "Every decision is journalled.", "tags": []},
+    ]
+    for query in ["retrieving", "retrieval", "retrieved"]:
+        hits = recall.search(query, journal_rows=journal, evidence_rows=[]).hits
+        assert hits and "retrieval" in hits[0].text, query
+    # Plural query against the singular stored form, and the odd spelling pair.
+    assert recall.search("decisions", journal_rows=journal, evidence_rows=[]).matched == 1
+    assert recall.search("journalling", journal_rows=journal, evidence_rows=[]).matched == 1
+
+
+def test_stemming_does_not_reintroduce_mid_word_noise():
+    # A stem must be a whole token, never a substring: "arch" may not reach
+    # "search" and "old" may not reach "threshold" just because stems exist.
+    rows = [
+        {"ts": "1", "type": "note", "text": "raise the threshold", "tags": []},
+        {"ts": "2", "type": "note", "text": "search the index", "tags": []},
+    ]
+    assert recall.search("old", journal_rows=rows, evidence_rows=[]).matched == 0
+    assert recall.search("arch", journal_rows=rows, evidence_rows=[]).matched == 0

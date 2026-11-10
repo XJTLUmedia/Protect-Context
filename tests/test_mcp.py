@@ -390,6 +390,21 @@ def test_guard_note_default_tags_are_not_shared_between_calls():
     assert [entry["tags"] for entry in journal.recent(5)] == [["agent"], ["agent"]]
 
 
+def _descriptions(node) -> list[str]:
+    """Every `description` string in a JSON-schema fragment, at any depth."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        value = node.get("description")
+        if isinstance(value, str):
+            found.append(value)
+        for child in node.values():
+            found.extend(_descriptions(child))
+    elif isinstance(node, list):
+        for child in node:
+            found.extend(_descriptions(child))
+    return found
+
+
 def test_tool_descriptions_name_use_params_returns_and_side_effects():
     """Glama and other directories score the tools/list text, not the README."""
     from fastmcp import Client
@@ -410,7 +425,10 @@ def test_tool_descriptions_name_use_params_returns_and_side_effects():
         assert "side effect" in lowered, name
         schema = tool.inputSchema or {}
         for param, spec in (schema.get("properties") or {}).items():
-            text = spec.get("description") or ""
+            # pydantic 2.14 nests the description of `X | None` inside an anyOf
+            # branch instead of the top level, so collect it recursively: the
+            # claim under test is "documented", not "documented at depth 0".
+            text = " ".join(_descriptions(spec))
             assert len(text) > 20, f"{name}.{param} needs a parameter description"
 
     journal = tools["guard_journal"]

@@ -23,21 +23,47 @@ GENERIC_TAGS = frozenset(
 )
 
 # Owner intent (SPEC §1 #6/#7). The journal already keeps the words, but a new
-# session has to guess how they were phrased to find them. These four tags name
-# what the owner actually expressed — wants, needs, preferences and "you are
-# wrong" corrections — and `intent` renders the profile without a query.
-INTENT_TAGS = ("owner-want", "owner-need", "owner-preference", "owner-correction")
+# session has to guess how they were phrased to find them. These tags name what
+# the owner actually expressed — wants, needs, preferences, standing negations
+# and "you are wrong" corrections — and `intent` renders the profile without a
+# query.
+INTENT_TAGS = (
+    "owner-want",
+    "owner-need",
+    "owner-preference",
+    "owner-constraint",
+    "owner-correction",
+)
+# The pi `input` handler journals every substantive owner prompt under this tag
+# (extension/index.ts). It names no kind, so such a row is classified like
+# owner-typed text and falls back to STATEMENT_KIND (2026-11-10 amendment).
+OWNER_PROMPT_TAG = "owner-prompt"
+STATEMENT_KIND = "owner-statement"
+# Kinds the intent view renders, in display order. INTENT_TAGS are also the tags
+# detection may write; the statement kind exists only when reading.
+INTENT_KINDS = INTENT_TAGS + (STATEMENT_KIND,)
+# Double-quoted and backticked spans are quotations, not statements.
+_QUOTED = re.compile(r'"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d')
 _ATTR = r"(?:owner|user)"
 _INTENT_PATTERNS = {
+    # `\s` before the verb, not `\b`: prose that names the tag itself
+    # ("tags: owner-want") is otherwise a false positive, because `\b` sits
+    # between "owner" and "-want" and "want" is a listed verb. The gap stops at
+    # clause punctuation for the same reason: "owner intent; the fix requires"
+    # is a sentence about the view, not a statement of intent.
     "owner-want": re.compile(
-        rf"\b{_ATTR}\b[^.]{{0,40}}\b(?:wants?|wanted|asked(?: for)?|said|says|chose|"
+        rf"\b{_ATTR}\b[^.,;:!?]{{0,40}}\s(?:wants?|wanted|asked(?: for)?|said|says|chose|"
         rf"chosen|approved|decided|told|took|insists?|expects?|requires?)\b"
     ),
     "owner-need": re.compile(
-        rf"\b{_ATTR}\b[^.]{{0,40}}\b(?:needs?|needed|must|required|has to)\b"
+        rf"\b{_ATTR}\b[^.,;:!?]{{0,40}}\s(?:needs?|needed|must|required|has to)\b"
     ),
     "owner-preference": re.compile(
-        rf"\b{_ATTR}\b[^.]{{0,60}}\b(?:prefers?|preferred|rather|instead)\b|\bprefers?\b"
+        rf"\b{_ATTR}\b[^.,;:!?]{{0,60}}\s(?:prefers?|preferred|rather|instead)\b|\bprefers?\b"
+    ),
+    "owner-constraint": re.compile(
+        rf"\b{_ATTR}\s+(?:said|says|told\s+me|asked)\b[^.]{{0,40}}"
+        rf"\b(?:not\s+to|never|don't|do\s+not)\b"
     ),
     "owner-correction": re.compile(
         rf"\bcorrection\s*\(\s*owner\s*\)|\byou(?:'re| are| were)?\s+(?:wrong|incorrect)\b"
@@ -49,15 +75,28 @@ _INTENT_PATTERNS = {
 # attribution: "ship it faster" is the owner's own voice even though the line
 # names no owner. Only `owner_authored=True` uses these, so journal prose
 # written by the agent is still judged by the attribution patterns above.
+_IMPERATIVE_VERBS = (
+    "add|audit|build|bump|change|check|clean|clone|commit|delete|document|drop|"
+    "ensure|explain|finish|fix|implement|install|investigate|keep|land|make|merge|"
+    "move|port|publish|pull|push|refactor|reinstall|reload|remove|rename|replace|"
+    "restart|revert|review|run|ship|split|test|update|use|vendor|verify|wire"
+)
+# Owner prompts are imperative and often open with a connective ("now reload
+# X", "then fix Y"); the lead-in must not hide the verb that names the request.
+_LEAD_IN = r"^(?:\s*(?:please|now|then|also|and|next|first|so|ok|okay)\b[,: ]*)*\s*"
 _OWNER_AUTHORED = {
     "owner-want": re.compile(
         r"\b(?:i|we)\s+(?:want|wanted|would like|'d like|asked for|expect)\b"
-        r"|^\s*(?:please\s+)?(?:fix|add|build|implement|change|make|use|remove|rename|"
-        r"update|ensure|keep|drop|replace|ship|finish|land|wire|port)\b"
+        rf"|{_LEAD_IN}(?:{_IMPERATIVE_VERBS})\b"
     ),
     "owner-need": re.compile(r"\b(?:i|we)\s+(?:need|needs|must|have to|require)\b"),
     "owner-preference": re.compile(
         r"\b(?:i|we)\s*(?:'d|would)?\s*(?:prefer|rather)\b|\bprefer\b|\binstead\b"
+    ),
+    # A start-anchored negation is a standing instruction, not a correction of
+    # past behaviour: "never commit to main", "do not touch the README".
+    "owner-constraint": re.compile(
+        rf"{_LEAD_IN}(?:do\s+not|don'?t|never|avoid|always|must|stop|no\s+more)\b"
     ),
     "owner-correction": re.compile(
         r"\b(?:you|it|that|this)\s+(?:is|was|are|were)\s+(?:wrong|incorrect)\b"
@@ -78,7 +117,10 @@ NUDGE_BY_TYPE = {
     "note": "Nudge: the journal persists across restarts — build on it.",
 }
 
-TEXT_CAP = 500  # free-text cap: journal text is re-injected into briefs (goal #12)
+# Free-text cap. It was 500, which silently cut 70% of real entries mid-word
+# (measured on this repo's own journal: 35/50 rows at the cap, 31 mid-word).
+# 4000 keeps a full decision with its rationale while still bounding the brief.
+TEXT_CAP = 4000
 TAG_COUNT_CAP = 8
 TAG_TEXT_CAP = 40
 READ_LIMIT_DEFAULT = 5
@@ -115,8 +157,14 @@ def detect_intent(text: object, owner_authored: bool = False) -> list[str]:
     owner typed themselves (the pi `input` event), so a paraphrase with no
     "owner"/"user" noun — "ship it faster", "I'd rather split this" — is still
     captured. Callers must only set it for owner-typed text.
+
+    Quoted text is blanked first: an entry that quotes the owner's words (or an
+    example string) is *about* intent, not an expression of it — the false
+    positive that pushed agent prose into the view the view exists to protect
+    (2026-11-10).
     """
     folded = _normalise_text(text, TEXT_CAP).casefold()
+    folded = _QUOTED.sub(" ", folded)
     patterns = [
         (tag, _INTENT_PATTERNS[tag], _OWNER_AUTHORED.get(tag) if owner_authored else None)
         for tag in INTENT_TAGS
@@ -129,10 +177,27 @@ def detect_intent(text: object, owner_authored: bool = False) -> list[str]:
 
 
 def _entry_intent(entry: dict) -> list[str]:
-    """Explicit owner-intent tags plus text detection (covers legacy rows)."""
+    """Kinds of owner intent a row carries (tags first, then text detection).
+
+    An ``owner-prompt`` row is the owner's own words, so it is judged like
+    owner-typed text (no attribution noun needed) and always counts: when no
+    want/need/preference/constraint/correction pattern matches, the row is
+    still an owner statement. Without this the literal request was journaled
+    trusted and then invisible to `guard_intent` — captured, not tellable
+    (2026-11-10).
+
+    The tag is self-describing, so an agent-written row can carry it by accident
+    (or on purpose). `owner-prompt` therefore only counts on a row without the
+    reserved `agent` tag: provenance outranks the claim, and a model note must
+    never borrow the owner-typed relaxation.
+    """
     tags = {tag.casefold() for tag in _normalise_tags(entry.get("tags"))}
-    detected = set(detect_intent(entry.get("text")))
-    return [tag for tag in INTENT_TAGS if tag in tags or tag in detected]
+    owner_prompt = OWNER_PROMPT_TAG in tags and "agent" not in tags
+    detected = set(detect_intent(entry.get("text"), owner_authored=owner_prompt))
+    kinds = [tag for tag in INTENT_TAGS if tag in tags or tag in detected]
+    if not kinds and owner_prompt:
+        kinds = [STATEMENT_KIND]
+    return kinds
 
 
 def _merge_intent_tags(text: str, tags: list[str], notes: list[str]) -> list[str]:
@@ -254,13 +319,70 @@ def _note_lesson_triggers(jtype: str | None, tags: list[str], notes: list[str]) 
     )
 
 
+def _infer_seq(rows: list[dict]) -> int:
+    """Highest numeric journal id already on disk, or the row count."""
+    highest = 0
+    for row in rows:
+        raw = row.get("id")
+        if isinstance(raw, str) and raw.startswith("jn-") and raw[3:].isdigit():
+            highest = max(highest, int(raw[3:]))
+    return highest
+
+
+def _ensure_ids() -> None:
+    """One-shot repair: give every legacy row an id, in file order.
+
+    Rows written before ids existed had no stable handle, so a decision could
+    only be cited by recency position. Numbering the whole ledger in file order
+    (ids sorted == chronologically sorted) is the only assignment that cannot
+    reorder history; it runs once and is a no-op afterwards.
+    """
+    rows = store.read_jsonl(store.journal_path())
+    if not rows or all(_normalise_text(row.get("id"), 16) for row in rows):
+        return
+    for index, row in enumerate(rows, start=1):
+        row["id"] = f"jn-{index:04d}"
+    store.rewrite_jsonl(store.journal_path(), rows)
+    state = store.load_state()
+    counters = state.get("counters")
+    if not isinstance(counters, dict):
+        counters = {}
+        state["counters"] = counters
+    counters["journal_seq"] = len(rows)
+    store.save_state(state)
+
+
+def _next_seq() -> int:
+    """Allocate the next durable journal id.
+
+    The counter lives in state.json rather than being derived from the ledger,
+    so rotation can never hand out an id twice. Legacy rows written before ids
+    existed still bound the floor via _infer_seq.
+    """
+    state = store.load_state()
+    counters = state.get("counters")
+    if not isinstance(counters, dict):
+        counters = {}
+        state["counters"] = counters
+    current = counters.get("journal_seq")
+    if not isinstance(current, int) or isinstance(current, bool):
+        current = _infer_seq(store.read_jsonl(store.journal_path()))
+    seq = current + 1
+    counters["journal_seq"] = seq
+    store.save_state(state)
+    return seq
+
+
 def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
     """Append a cleaned journal entry; reject unknown types and blank text."""
     _validate_type(jtype)
     clean_text = _normalise_text(text, TEXT_CAP)
     if not clean_text:
         raise ValueError("journal text must not be blank")
+    supplied = len(str(text))
     notes: list[str] = []
+    if supplied > len(clean_text):
+        notes.append(f"text truncated {supplied} -> {len(clean_text)} chars (TEXT_CAP)")
     clean_tags = _fix_satisfaction_tags(_normalise_tags(tags), notes)
     # The display cap must never drop provenance: a row that was written as an
     # agent note stays unverified. Callers that use tags_with_required are
@@ -269,7 +391,14 @@ def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
         clean_tags = clean_tags[: TAG_COUNT_CAP - 1] + ["agent"]
     clean_tags = _merge_intent_tags(clean_text, clean_tags, notes)
     _note_lesson_triggers(jtype, clean_tags, notes)
+    # Repair the ledger before allocating, so ids stay chronological even for
+    # rows written before the field existed.
+    _ensure_ids()
     entry = {
+        "id": f"jn-{_next_seq():04d}",
+        # Which session made the call: without it a decision and the evidence
+        # that proved it relate only by timestamp proximity.
+        "session": store.session_id(),
         "ts": store.now_ts(),
         "type": jtype,
         "text": clean_text,
@@ -339,7 +468,11 @@ def render_recent(entries: list[dict], total: int, jtype: str | None = None) -> 
         text = _normalise_text(entry.get("text"), TEXT_CAP) or "(blank legacy entry)"
         tags = _normalise_tags(entry.get("tags"))
         tag_s = f" [{','.join(tags)}]" if tags else ""
-        lines.append(f"{ts} · {entry_type} · {text}{tag_s}")
+        # The id is what makes a decision citable the way ev-NNNN makes a run
+        # citable; legacy rows written before ids simply omit it.
+        eid = _normalise_text(entry.get("id"), 16)
+        id_s = f" · {eid}" if eid else ""
+        lines.append(f"{ts} · {entry_type} · {text}{tag_s}{id_s}")
     lines.append("Nudge: re-read durable decisions and corrections before resuming work.")
     return "\n".join(lines)
 
@@ -349,16 +482,17 @@ def intent_with_total(
 ) -> tuple[list[tuple[dict, list[str]]], int, dict[str, int]]:
     """``(rows, total, counts)`` for owner-intent entries, oldest first.
 
-    Reads the journal once. A row counts when it carries an ``owner-*`` tag or
-    when its text detects as owner intent, so rows written before this view
-    existed are still captured. ``counts`` covers every row, not the page, so a
-    bounded render never lies about how much the owner asked for.
+    Reads the journal once. A row counts when it carries an owner-intent tag, an
+    ``owner-prompt`` tag (the owner's own words, always a statement), or when its
+    text detects as owner intent, so rows written before this view existed are
+    still captured. ``counts`` covers every row, not the page, so a bounded
+    render never lies about how much the owner asked for.
     """
     entries = [entry for entry in store.read_jsonl(store.journal_path()) if isinstance(entry, dict)]
     classified = [(entry, _entry_intent(entry)) for entry in entries]
     classified = [(entry, kinds) for entry, kinds in classified if kinds]
     counts = {
-        tag: sum(1 for _entry, kinds in classified if tag in kinds) for tag in INTENT_TAGS
+        tag: sum(1 for _entry, kinds in classified if tag in kinds) for tag in INTENT_KINDS
     }
     # Provenance split: how much of the profile is the owner's own record and how
     # much is the agent's report of it (unverified). Without this a page of
@@ -381,7 +515,7 @@ def render_intent(
     """One line per owner statement, newest first, with per-kind counts."""
     shown = rows[-READ_LIMIT_MAX:]
     counts_s = " · ".join(
-        f"{tag.removeprefix('owner-')} {counts.get(tag, 0)}" for tag in INTENT_TAGS
+        f"{tag.removeprefix('owner-')} {counts.get(tag, 0)}" for tag in INTENT_KINDS
     )
     lines = [
         f"PC intent · {len(shown)} of {max(0, int(total))} owner statements · {counts_s}"

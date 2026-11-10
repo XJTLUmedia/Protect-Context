@@ -3,12 +3,18 @@
  * (SPEC §1 #6 #7, §2). No pi imports.
  */
 
-import { appendJsonl, journalPath, readJsonl } from "./store.ts";
+import pino from "pino";
+
+import { appendJsonl, journalPath, loadState, readJsonl, rewriteJsonl, saveState } from "./store.ts";
 import { normalizeOneLine } from "./text.ts";
 
 export type JournalType = "decision" | "correction" | "risk" | "note";
 
 export interface JournalEntry {
+  /** Stable, citable handle (jn-0007), the journal's equivalent of ev-0007. */
+  id?: string;
+  /** Join key to the events/evidence ledgers, mirroring journal.py. */
+  session?: string | null;
   ts: string;
   type: JournalType;
   text: string;
@@ -20,7 +26,14 @@ export function isJournalType(v: unknown): v is JournalType {
 }
 
 /** Free-text cap (chars): journal text is re-injected into briefs (goal #12). */
-export const TEXT_CAP = 500;
+// 500 silently cut 70% of this project's own journal mid-word (35/50 rows at
+// the cap). 4000 keeps a full decision with its rationale; the brief stays
+// bounded because only a few entries are re-injected.
+export const TEXT_CAP = 4000;
+
+/** Guard diagnostics on raw fd 2: tool output on stdout must stay clean for the
+ * agent, and journal truncation used to be silent. */
+const journalLog = pino({ level: "warn" }, pino.destination(2));
 export const TAG_COUNT_CAP = 8;
 export const TAG_TEXT_CAP = 40;
 /** Read-view bounds (mirror journal.READ_LIMIT_* in Python). */
@@ -51,30 +64,66 @@ export function hasAgentTag(tags: unknown): boolean {
 
 /** Owner intent (SPEC §1 #6/#7). The journal already keeps the owner's words,
  * but a new session has to guess how they were phrased to find them. These
- * four tags name what the owner actually expressed — wants, needs, preferences
- * and "you are wrong" corrections — and `intent` renders the profile with no
- * query at all (mirrors journal.INTENT_TAGS in Python). */
+ * tags name what the owner actually expressed — wants, needs, preferences,
+ * standing negations and "you are wrong" corrections — and `intent` renders the
+ * profile with no query at all (mirrors journal.INTENT_TAGS in Python). */
 export const INTENT_TAGS = [
   "owner-want",
   "owner-need",
   "owner-preference",
+  "owner-constraint",
   "owner-correction",
 ] as const;
 export type IntentTag = (typeof INTENT_TAGS)[number];
 
+/** Tag the pi `input` handler writes for every substantive owner prompt. It
+ *  names no kind, so a row carrying it is judged like owner-typed text and
+ *  falls back to STATEMENT_KIND (2026-11-10 amendment). */
+export const OWNER_PROMPT_TAG = "owner-prompt";
+export const STATEMENT_KIND = "owner-statement";
+/** Kinds the intent view renders. INTENT_TAGS are the tags detection writes;
+ *  the statement kind exists only when reading. */
+export const INTENT_KINDS = [...INTENT_TAGS, STATEMENT_KIND] as const;
+export type IntentKind = (typeof INTENT_KINDS)[number];
+
 const ATTR = "(?:owner|user)";
+// `\s` before the verb, not `\b`: prose that names the tag itself ("tags:
+// owner-want") is otherwise a false positive, because `\b` sits between
+// "owner" and "-want" and "want" is a listed verb. The gap stops at clause
+// punctuation for the same reason: "owner intent; the fix requires" is a
+// sentence about the view, not a statement of intent.
 const INTENT_PATTERNS: Record<IntentTag, RegExp> = {
   "owner-want": new RegExp(
-    `\\b${ATTR}\\b[^.]{0,40}\\b(?:wants?|wanted|asked(?: for)?|said|says|chose|chosen|approved|decided|told|took|insists?|expects?|requires?)\\b`,
+    `\\b${ATTR}\\b[^.,;:!?]{0,40}\\s(?:wants?|wanted|asked(?: for)?|said|says|chose|chosen|approved|decided|told|took|insists?|expects?|requires?)\\b`,
   ),
-  "owner-need": new RegExp(`\\b${ATTR}\\b[^.]{0,40}\\b(?:needs?|needed|must|required|has to)\\b`),
+  "owner-need": new RegExp(
+    `\\b${ATTR}\\b[^.,;:!?]{0,40}\\s(?:needs?|needed|must|required|has to)\\b`,
+  ),
   "owner-preference": new RegExp(
-    `\\b${ATTR}\\b[^.]{0,60}\\b(?:prefers?|preferred|rather|instead)\\b|\\bprefers?\\b`,
+    `\\b${ATTR}\\b[^.,;:!?]{0,60}\\s(?:prefers?|preferred|rather|instead)\\b|\\bprefers?\\b`,
+  ),
+  "owner-constraint": new RegExp(
+    `\\b${ATTR}\\s+(?:said|says|told\\s+me|asked)\\b[^.]{0,40}\\b(?:not\\s+to|never|don't|do\\s+not)\\b`,
   ),
   "owner-correction": new RegExp(
     `\\bcorrection\\s*\\(\\s*owner\\s*\\)|\\byou(?:'re| are| were)?\\s+(?:wrong|incorrect)\\b|\\b${ATTR}\\s+(?:said|says|told\\s+me)\\b[^.]{0,40}\\b(?:wrong|incorrect|mistake)\\b`,
   ),
 };
+
+/** Imperative verbs that start an owner request. The list is broad on purpose:
+ *  the first version had 17 verbs, so "audit the plugin", "reinstall the venv"
+ *  and "install many packages" were captured as prompts but detected as no
+ *  intent at all (2026-11-10). */
+const IMPERATIVE_VERBS =
+  "add|audit|build|bump|change|check|clean|clone|commit|delete|document|drop|" +
+  "ensure|explain|finish|fix|implement|install|investigate|keep|land|make|merge|" +
+  "move|port|publish|pull|push|refactor|reinstall|reload|remove|rename|replace|" +
+  "restart|revert|review|run|ship|split|test|update|use|vendor|verify|wire";
+/** Owner prompts are imperative and often open with a connective ("now reload
+ *  X", "then fix Y"); the lead-in must not hide the verb that names the ask. */
+const LEAD_IN = "^(?:\\s*(?:please|now|then|also|and|next|first|so|ok|okay)\\b[,: ]*)*\\s*";
+/** Double-quoted and backticked spans are quotations, not statements. */
+const QUOTED = /"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d/g;
 
 /** Extra patterns that only apply to text the owner typed (mirrors Python's
  * `_OWNER_AUTHORED`): a first-person want or a leading imperative is the
@@ -82,11 +131,16 @@ const INTENT_PATTERNS: Record<IntentTag, RegExp> = {
 const OWNER_AUTHORED: Record<IntentTag, RegExp> = {
   "owner-want": new RegExp(
     `\\b(?:i|we)\\s+(?:want|wanted|would like|'d like|asked for|expect)\\b` +
-      `|^\\s*(?:please\\s+)?(?:fix|add|build|implement|change|make|use|remove|rename|update|ensure|keep|drop|replace|ship|finish|land|wire|port)\\b`,
+      `|${LEAD_IN}(?:${IMPERATIVE_VERBS})\\b`,
   ),
   "owner-need": new RegExp(`\\b(?:i|we)\\s+(?:need|needs|must|have to|require)\\b`),
   "owner-preference": new RegExp(
     `\\b(?:i|we)\\s*(?:'d|would)?\\s*(?:prefer|rather)\\b|\\bprefer\\b|\\binstead\\b`,
+  ),
+  // A start-anchored negation is a standing instruction, not a correction of
+  // past behaviour: "never commit to main", "do not touch the README".
+  "owner-constraint": new RegExp(
+    `${LEAD_IN}(?:do\\s+not|don'?t|never|avoid|always|must|stop|no\\s+more)\\b`,
   ),
   "owner-correction": new RegExp(
     `\\b(?:you|it|that|this)\\s+(?:is|was|are|were)\\s+(?:wrong|incorrect)\\b` +
@@ -103,9 +157,14 @@ const OWNER_AUTHORED: Record<IntentTag, RegExp> = {
  *
  * `ownerAuthored` relaxes the attribution requirement for text the owner typed
  * themselves (the pi `input` event), so a paraphrase with no owner/user noun —
- * "ship it faster" — is still captured. Only pass true for owner-typed text. */
+ * "ship it faster" — is still captured. Only pass true for owner-typed text.
+ *
+ * Quoted text is blanked first: an entry that quotes the owner's words (or an
+ * example string) is *about* intent, not an expression of it — the false
+ * positive that pushed agent prose into the view the view exists to protect
+ * (2026-11-10). */
 export function detectIntent(text: unknown, ownerAuthored = false): IntentTag[] {
-  const folded = normalizeOneLine(text, TEXT_CAP).toLowerCase();
+  const folded = normalizeOneLine(text, TEXT_CAP).toLowerCase().replace(QUOTED, " ");
   return INTENT_TAGS.filter(
     (tag) =>
       INTENT_PATTERNS[tag].test(folded) ||
@@ -113,13 +172,27 @@ export function detectIntent(text: unknown, ownerAuthored = false): IntentTag[] 
   );
 }
 
-/** Explicit owner-intent tags plus text detection (covers legacy rows). */
-function intentOf(entry: JournalEntry): IntentTag[] {
+/** Kinds of owner intent a row carries (tags first, then text detection).
+ *
+ * An `owner-prompt` row is the owner's own words, so it is judged like
+ * owner-typed text (no attribution noun needed) and always counts: when no
+ * want/need/preference/constraint/correction pattern matches, the row is still
+ * an owner statement. Without this the literal request was journaled trusted
+ * and then invisible to `guard_intent` — captured, not tellable (2026-11-10).
+ *
+ * The tag is self-describing, so an agent-written row can carry it by accident
+ * (or on purpose). `owner-prompt` therefore only counts on a row without the
+ * reserved `agent` tag: provenance outranks the claim, and a model note must
+ * never borrow the owner-typed relaxation. */
+function intentOf(entry: JournalEntry): IntentKind[] {
   const tags = new Set(
     tagCandidates(entry.tags).map((tag) => normalizeOneLine(tag, TAG_TEXT_CAP).toLowerCase()),
   );
-  const detected = new Set<string>(detectIntent(entry.text));
-  return INTENT_TAGS.filter((tag) => tags.has(tag) || detected.has(tag));
+  const ownerPrompt = tags.has(OWNER_PROMPT_TAG) && !hasAgentTag(entry.tags);
+  const detected = new Set<string>(detectIntent(entry.text, ownerPrompt));
+  const kinds = INTENT_TAGS.filter((tag) => tags.has(tag) || detected.has(tag));
+  if (kinds.length === 0 && ownerPrompt) return [STATEMENT_KIND];
+  return kinds;
 }
 
 /** Tag a captured owner intent so a future session can find it by tag.
@@ -164,9 +237,42 @@ export function tagsWithRequired(
   return [...clean.slice(0, TAG_COUNT_CAP - 1), requiredClean];
 }
 
+function nextJournalSeq(cwd: string, existing: JournalEntry[]): number {
+  const state = loadState(cwd);
+  let current = (state?.counters as Record<string, number | string> | undefined)?.journal_seq;
+  if (typeof current !== "number" || !Number.isInteger(current)) {
+    current = existing.reduce((high, row) => {
+      const raw = typeof row.id === "string" ? row.id : "";
+      const n = raw.startsWith("jn-") ? Number.parseInt(raw.slice(3), 10) : Number.NaN;
+      return Number.isInteger(n) ? Math.max(high, n) : high;
+    }, 0);
+  }
+  const seq = (current as number) + 1;
+  if (state) {
+    state.counters = { ...state.counters, journal_seq: seq };
+    saveState(cwd, state);
+  }
+  return seq;
+}
+
+/** One-shot repair: give every legacy row an id, in file order. Mirrors
+ *  journal._ensure_ids — numbering the ledger in file order is the only
+ *  assignment that cannot reorder history, and it is a no-op afterwards. */
+function ensureIds(cwd: string): void {
+  const rows = readJournal(cwd);
+  if (rows.length === 0 || rows.every((row) => typeof row.id === "string" && row.id !== "")) return;
+  const repaired = rows.map((row, index) => ({ ...row, id: `jn-${String(index + 1).padStart(4, "0")}` }));
+  rewriteJsonl(journalPath(cwd), repaired);
+  const state = loadState(cwd);
+  if (state) {
+    state.counters = { ...state.counters, journal_seq: repaired.length };
+    saveState(cwd, state);
+  }
+}
+
 export function appendJournal(
   cwd: string,
-  entry: { type: JournalType; text: string; tags?: string[] },
+  entry: { type: JournalType; text: string; tags?: string[]; session?: string | null },
 ): JournalEntry {
   // Runtime validation, not just the type: tool parameters can arrive as
   // unvalidated strings, and a row with an unknown type is ignored by every
@@ -178,8 +284,17 @@ export function appendJournal(
   }
   const cleanText = sanitizeJournalText(entry.text);
   if (cleanText === "") throw new Error("journal text must not be blank");
+  const supplied = typeof entry.text === "string" ? entry.text.length : 0;
+  if (supplied > cleanText.length) {
+    journalLog.warn(
+      { supplied, kept: cleanText.length, cap: TEXT_CAP },
+      "journal text truncated to TEXT_CAP",
+    );
+  }
   // The display cap must never drop provenance: a row written as an agent note
   // stays unverified even when the caller's tag list overflows.
+  // Repair legacy rows before allocating so ids stay chronological.
+  ensureIds(cwd);
   let tags = sanitizeTags(entry.tags);
   const suppliedAgent = tagCandidates(entry.tags).some(
     (tag) => normalizeOneLine(tag, TAG_TEXT_CAP).toLowerCase() === "agent",
@@ -190,6 +305,8 @@ export function appendJournal(
   const full: JournalEntry = {
     ts: new Date().toISOString(),
     type: entry.type,
+    id: `jn-${String(nextJournalSeq(cwd, readJournal(cwd))).padStart(4, "0")}`,
+    session: entry.session ?? null,
     text: cleanText,
     tags: mergeIntentTags(cleanText, tags),
   };
@@ -287,28 +404,29 @@ export function recentDecisions(journal: JournalEntry[], n: number): JournalEntr
 
 export interface IntentRow {
   entry: JournalEntry;
-  kinds: IntentTag[];
+  kinds: IntentKind[];
 }
 
 /** Owner-intent rows (oldest first, like every journal view) plus counts.
  *
- * A row counts when it carries an `owner-*` tag or when its text detects as
- * owner intent, so rows written before this view existed are still captured.
- * `counts` covers every row, not the page, so a bounded render never lies
- * about how much the owner asked for. */
+ * A row counts when it carries an owner-intent tag, the `owner-prompt` tag
+ * (always a statement), or when its text detects as owner intent, so rows
+ * written before this view existed are still captured. `counts` covers every
+ * row, not the page, so a bounded render never lies about how much the owner
+ * asked for. */
 export function intentWithTotal(
   journal: JournalEntry[],
   limit: number,
-): { rows: IntentRow[]; total: number; counts: Record<IntentTag | "owner" | "agent", number> } {
+): { rows: IntentRow[]; total: number; counts: Record<IntentKind | "owner" | "agent", number> } {
   const classified: IntentRow[] = [];
   for (const entry of journal) {
     if (entry === null || typeof entry !== "object") continue;
     const kinds = intentOf(entry);
     if (kinds.length > 0) classified.push({ entry, kinds });
   }
-  const counted: Record<IntentTag | "owner" | "agent", number> = Object.fromEntries(
-    INTENT_TAGS.map((tag) => [tag, classified.filter((row) => row.kinds.includes(tag)).length]),
-  ) as Record<IntentTag | "owner" | "agent", number>;
+  const counted: Record<IntentKind | "owner" | "agent", number> = Object.fromEntries(
+    INTENT_KINDS.map((tag) => [tag, classified.filter((row) => row.kinds.includes(tag)).length]),
+  ) as Record<IntentKind | "owner" | "agent", number>;
   // Provenance split: how much of the profile is the owner's own record and how
   // much the agent's report of it. Without it a page of [agent] lines reads as
   // owner authority.
@@ -323,10 +441,10 @@ export function intentWithTotal(
 export function renderIntent(
   rows: IntentRow[],
   total: number,
-  counts: Record<IntentTag | "owner" | "agent", number>,
+  counts: Record<IntentKind | "owner" | "agent", number>,
 ): string {
   const shown = rows.slice(-READ_LIMIT_MAX);
-  const countsText = INTENT_TAGS.map(
+  const countsText = INTENT_KINDS.map(
     (tag) => `${tag.slice("owner-".length)} ${counts[tag] ?? 0}`,
   ).join(" · ");
   const lines = [

@@ -64,3 +64,27 @@ def test_rotated_file_is_valid_jsonl(monkeypatch):
     for segment in segments:
         for line in segment.read_text(encoding="utf-8").splitlines():
             assert isinstance(json.loads(line), dict), f"{segment.name} stays parseable"
+
+
+def test_a_damaged_ledger_byte_does_not_take_the_guard_down(tmp_path):
+    """A non-UTF-8 byte used to raise UnicodeDecodeError out of every reader.
+
+    Writes are atomic, but a ledger can still be damaged from outside (a
+    half-synced disk, a truncated copy, a hand edit). The guard must salvage the
+    intact rows instead of failing closed on the whole file — otherwise one bad
+    byte disables status, recall, loops and verify at once.
+    """
+    from protect_context import store
+
+    ledger = tmp_path / "events.jsonl"
+    ledger.write_bytes(
+        b'{"kind":"tool_result","ok":true,"tool":"bash"}\n'
+        b"\xff\xfe truncated garbage \x00\n"
+        b'{"kind":"tool_result","ok":false,"tool":"bash","cmd":"pytest -q"}\n'
+    )
+
+    rows = store.read_jsonl(ledger)
+
+    assert len(rows) == 2, "the two intact rows must survive the damaged one"
+    assert rows[0]["ok"] is True
+    assert rows[1]["cmd"] == "pytest -q"

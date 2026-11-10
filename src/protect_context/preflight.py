@@ -16,6 +16,7 @@ from . import store
 
 PREFLIGHT_TOOLS_MAX = 20
 TOOL_NAME_MAX = 120
+VERSION_DISPLAY_MAX = 60
 PROBE_OUTPUT_MAX_BYTES = 4096
 PROBE_TIMEOUT_S = 2.0
 PREFLIGHT_DEADLINE_S = 15.0
@@ -68,18 +69,38 @@ def _probe(argv: list[str], timeout_s: float) -> tuple[int | None, str, bool]:
     return (None if timed_out else process.returncode), text, timed_out
 
 
+def _compact_version(tool: str, line: str) -> str:
+    """`git version 2.43.0` → `2.43.0`; `pip 24.0 from /x (python 3.12)` → `24.0`.
+
+    The renderer prints the tool name itself, so a repeated token is noise; the
+    path after " from " is cut before truncation so a long directory cannot eat
+    the whole budget and hide the number.
+    """
+    first = line.strip().split(" from ", 1)[0]
+    words = first.split()
+    tool_token = tool.rsplit("/", 1)[-1].casefold()
+    # `git version 2.43.0` and `pytest 9.1.1` both lead with a token the renderer
+    # already prints; strip tool name and the literal "version", in either order.
+    while len(words) > 1 and words[0].casefold() in {"version", tool_token}:
+        words = words[1:]
+    return store.display_text(" ".join(words), VERSION_DISPLAY_MAX)
+
+
 def _version(tool: str, timeout_s: float = PROBE_TIMEOUT_S) -> tuple[str | None, bool]:
-    """Return a compact version line and whether the probe was incomplete."""
+    """Return a compact version line and whether the probe was incomplete.
+
+    Found 2026-11-10: preflight printed `git git 2.43.0` and truncated pip's
+    path mid-directory, because the old code stripped the literal `version `
+    and then cut the line at 60 chars.
+    """
     returncode, text, timed_out = _probe([tool, "--version"], timeout_s)
     if timed_out or returncode != 0:
         return None, True
     first_raw = next((line for line in text.splitlines() if line.strip()), "")
-    first = store.display_text(first_raw, 60)
-    if not first:
+    if not first_raw.strip():
         return None, True
-    # normalize "git version 2.43.0" → "2.43.0"
-    first = first.replace("version ", "", 1)
-    return first or None, False
+    compact = _compact_version(tool, first_raw)
+    return compact or None, False
 
 
 def in_git_repo(timeout_s: float = PROBE_TIMEOUT_S) -> bool:

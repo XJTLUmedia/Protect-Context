@@ -1,9 +1,25 @@
 """Shared fixtures: every test runs in a temp cwd so .agent-guard is created
 in a temp dir (SPEC §7), with a deterministic session id."""
 
+import shutil
+
 import pytest
 
 from protect_context import store
+
+
+def pytest_configure(config):
+    """Fail once, clearly, when `git` is missing.
+
+    Diff, orientation, preflight and the demo all shell out to git; without it
+    those tests raise FileNotFoundError one by one (16 confusing failures in a
+    slim container on 2026-11-10) instead of saying what is wrong.
+    """
+    if shutil.which("git") is None:
+        raise pytest.UsageError(
+            "git is not on PATH; the suite shells out to it (diff, orientation, preflight). "
+            "Install git or run where it is available."
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +47,9 @@ def write_events():
         rows = []
         for e in events:
             row = {
-                "ts": "2026-08-28T10:00:00Z",
+                # Fixed by default so fixtures are deterministic; a test that
+                # needs a fresh or stale streak passes its own ts.
+                "ts": e.get("ts", "2026-08-28T10:00:00Z"),
                 "session": e.get("session", session),
                 "kind": e["kind"],
                 "tool": e.get("tool", "bash"),

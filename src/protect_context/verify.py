@@ -68,6 +68,22 @@ RISK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+def _bounded_digest(text: str, ok: bool) -> str:
+    """Bound the stored digest to DIGEST_MAX without losing a failure's cause.
+
+    A trailing window is right for a passing run, but a failing one reports at
+    the END of pytest output while the originating error or the first failing
+    assertion sits near the START. Keeping both ends means a past failure can
+    still be diagnosed from the ledger instead of only its last twenty lines.
+    """
+    if len(text) <= DIGEST_MAX:
+        return text
+    if ok:
+        return text[-DIGEST_MAX:]
+    head = DIGEST_MAX // 3
+    return text[:head] + "\n[...]\n" + text[-(DIGEST_MAX - head - 6) :]
+
+
 def match_risk(command: str) -> str | None:
     """Return the matched risk-pattern name, or None (mirrors the extension)."""
     cmd = store.fingerprint(command)
@@ -371,7 +387,11 @@ def run_verify(command: str, timeout_s: int = 180) -> dict:
         timed_out = False
     ok = exit_code == 0 and not timed_out
     if timed_out:
-        combined = (combined + f"\n[guard_verify: timeout after {timeout_s}s]")[-DIGEST_MAX:]
+        combined = _bounded_digest(
+            combined + f"\n[guard_verify: timeout after {timeout_s}s]", ok=False
+        )
+    else:
+        combined = _bounded_digest(combined, ok=ok)
 
     risk = match_risk(command)
     if risk:
