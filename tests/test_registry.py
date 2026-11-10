@@ -151,6 +151,44 @@ def test_check_workflow_runs_both_suites_and_their_prerequisites():
         assert re.fullmatch(r"[0-9a-f]{40}", pin), f"{action} must be pinned by commit SHA"
     assert "permissions:" in text and "contents: read" in text
     assert text.count("persist-credentials: false") == 2
+    # vendor/ is a set of gitlinks. Checkout runs `git submodule foreach` even
+    # when it is not asked to recurse, and that command exits 128 unless every
+    # gitlink has a URL. Both jobs must also fetch the checkouts: the Python
+    # import bootstrap prefers them over site-packages.
+    assert text.count("submodules: true") == 2
+
+
+def test_vendor_gitlinks_have_gitmodules_urls():
+    """Checkout dies before any test if a vendor gitlink has no URL.
+
+    actions/checkout runs `git submodule foreach` while removing credentials.
+    Git 2.56 exits 128 with `No url found for submodule path 'vendor/...'`
+    when the index has a gitlink and `.gitmodules` does not name it.
+    """
+    import subprocess
+
+    listed = subprocess.run(
+        ["git", "ls-tree", "HEAD", "vendor/"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    gitlinks = []
+    for line in listed.stdout.splitlines():
+        mode, _typ, _sha, path = line.split(maxsplit=3)
+        assert mode == "160000", line
+        gitlinks.append(path)
+    assert gitlinks, "vendor/ checkouts disappeared"
+    modules = (ROOT / ".gitmodules").read_text()
+    for path in gitlinks:
+        assert f'path = {path}\n' in modules, path
+        # The URL is the next line in the block git writes.
+        block = modules.split(f'[submodule "{path}"]', 1)
+        assert len(block) == 2, path
+        body = block[1].split("\n[", 1)[0]
+        assert "url = https://github.com/" in body, path
+        assert body.strip().endswith(".git"), path
 
 
 def test_root_mcp_and_glama_listing_files():

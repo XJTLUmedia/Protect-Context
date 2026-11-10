@@ -1,0 +1,33 @@
+[submodule "vendor/chalk"]
+	path = vendor/chalk
+	url = https://github.com/chalk/chalk.git
+[submodule "vendor/commander.js"]
+	path = vendor/commander.js
+	url = https://github.com/tj/commander.js.git
+[submodule "vendor/cosmiconfig"]
+	path = vendor/cosmiconfig
+	url = https://github.com/cosmiconfig/cosmiconfig.git
+[submodule "vendor/node-glob"]
+	path = vendor/node-glob
+	url = https://github.com/isaacs/node-glob.git
+[submodule "vendor/opossum"]
+	path = vendor/opossum
+	url = https://github.com/nodeshift/opossum.git
+[submodule "vendor/ora"]
+	path = vendor/ora
+	url = https://github.com/sindresorhus/ora.git
+[submodule "vendor/pino"]
+	path = vendor/pino
+	url = https://github.com/pinojs/pino.git
+[submodule "vendor/pybreaker"]
+	path = vendor/pybreaker
+	url = https://github.com/danielfm/pybreaker.git
+[submodule "vendor/pydantic-settings"]
+	path = vendor/pydantic-settings
+	url = https://github.com/pydantic/pydantic-settings.git
+[submodule "vendor/tenacity"]
+	path = vendor/tenacity
+	url = https://github.com/jd/tenacity.git
+[submodule "vendor/typer"]
+	path = vendor/typer
+	url = https://github.com/fastapi/typer.git
