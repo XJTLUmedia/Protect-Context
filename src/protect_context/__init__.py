@@ -11,6 +11,6 @@ from . import vendored
 
 vendored.activate()
 
-__version__ = "3.3.0"
+__version__ = "3.3.1"
 
 __all__ = ["__version__", "vendored"]

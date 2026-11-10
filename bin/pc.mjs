@@ -54,7 +54,7 @@ const program = new Command();
 program
   .name("pc")
   .description("Read the protect-context store (.agent-guard/) from Node")
-  .version("3.3.0");
+  .version("3.3.1");
 
 program
   .command("journal")

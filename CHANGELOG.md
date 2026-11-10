@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.1
+
+- Version 3.3.1 in every artifact (`package.json`, `package-lock.json` in both places npm records it, `pyproject.toml`, `__init__.py`, `server.json`, `bin/pc.mjs`, `CHANGELOG.md`) so npm, PyPI, and the MCP Registry publish this tree. npm 3.3.0 was published before the notes below landed. PyPI is still 3.2.1. The MCP Registry is still 3.2.1.
+- README demo GIF (`docs/assets/demo.gif`) replaced with a productivity explainer covering the loop brake, UNTRUSTED versus recorded evidence, and local recall.
+- `vendor/` checkouts are registered in `.gitmodules` and fetched by CI. They were gitlinks with no URL, so `actions/checkout` died in `git submodule foreach` before pytest or the extension suite could start.
+- PyPI author metadata is Alex Yu. The email stays `xjtlumedia@gmail.com`.
+
 ## 3.3.0
 
 Owner intent is now actually tellable, and two contract checks are measured
@@ -90,8 +97,6 @@ instead of asserted.
   orientation, preflight and the demo; in a slim container that surfaced as 16
   separate `FileNotFoundError` failures. `tests/conftest.py` now raises one
   `pytest.UsageError` naming the missing binary.
-- README demo GIF (`docs/assets/demo.gif`) replaced with a productivity explainer covering the loop brake, UNTRUSTED versus recorded evidence, and local recall.
-- `vendor/` checkouts are registered in `.gitmodules` and fetched by CI. They were gitlinks with no URL, so `actions/checkout` died in `git submodule foreach` before pytest or the extension suite could start.
 
 ## 3.2.1
 
