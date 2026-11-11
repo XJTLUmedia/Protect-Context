@@ -311,3 +311,12 @@ def test_partial_cfg_falls_back_to_builtin_defaults():
     if "error" not in st:
         assert st["warn_lines"] == 1
         assert st["warn_files"] == DEFAULT_CONFIG["diff_warn_files"]
+
+
+def test_git_own_prefix_is_not_doubled():
+    """``PC diff · error: fatal: not a git repository`` read like two errors."""
+    out = diffscope.render({"error": "fatal: not a git repository (or any of the parent directories): .git"})
+    assert out.startswith("PC diff · error: not a git repository")
+    assert "fatal:" not in out.splitlines()[0]
+    # A message without the prefix is untouched.
+    assert diffscope.render({"error": "no merge base"}).startswith("PC diff · error: no merge base")

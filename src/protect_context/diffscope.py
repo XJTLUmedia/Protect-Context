@@ -368,6 +368,8 @@ def diff_audit(baseline: str | None = None, cfg: dict | None = None) -> dict:
 def render(st: dict) -> str:
     if "error" in st:
         error = store.display_text(st["error"], 240) or "Git audit unavailable"
+        # git's own prefix would double up with ours: "PC diff · error: fatal: …"
+        error = re.sub(r"^(?:fatal|error):\s*", "", error, flags=re.IGNORECASE)
         return f"PC diff · error: {error}\nNudge: run inside a git repository, or pass an explicit baseline ref."
     if st.get("untracked_scan_limited") and st["verdict"] != "hard":
         advice = (
