@@ -283,3 +283,24 @@ def test_every_third_party_import_is_declared():
     assert not undeclared_imports, f"add these to _IMPORT_TO_DIST: {undeclared_imports}"
     missing = sorted({_IMPORT_TO_DIST[m] for m in imported} - declared)
     assert not missing, f"imports without a declared dependency: {missing}"
+
+
+def test_the_term_bridge_ships_with_its_attribution():
+    """The lexicon is data, and half of it is CC BY-SA 4.0.
+
+    Both artifacts must carry the table *and* the notice that says where it came
+    from: a wheel without the file silently loses the bridge, and one without
+    NOTICE redistributes the data without attribution.
+    """
+    import json
+
+    from protect_context import glossary
+
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    assert "src/protect_context/lexicon.tsv" in package["files"]
+    assert "NOTICE" in package["files"]
+    assert 'license-files = ["LICENSE", "NOTICE"]' in PYPROJECT
+    assert 'protect_context = ["lexicon.tsv"]' in PYPROJECT
+    assert glossary.LEXICON_PATH.is_file()
+    text = glossary.LEXICON_PATH.read_text(encoding="utf-8")
+    assert "CC BY-SA 4.0" in text and "CC-CEDICT" in text

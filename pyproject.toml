@@ -8,7 +8,9 @@ version = "3.3.1"
 description = "protect-context agent guardrail suite: shared store, MCP server (fastmcp), CLI"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+# NOTICE carries the CC BY-SA 4.0 attribution for the dictionary section
+# of lexicon.tsv, so it ships with the wheel the same way LICENSE does.
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Alex Yu", email = "xjtlumedia@gmail.com" }]
 keywords = [
   "mcp",

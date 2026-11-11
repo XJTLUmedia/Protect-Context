@@ -40,7 +40,8 @@
     "extension/lib",
     "preview.png",
     "LICENSE",
-    "src/protect_context/lexicon.tsv"
+    "src/protect_context/lexicon.tsv",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=22.19.0"
