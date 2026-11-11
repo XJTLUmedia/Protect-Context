@@ -34,6 +34,17 @@ python3 examples/loop-brake-demo/demo.py
 
 It exits 0 when the third identical `guard_verify("false")` is blocked and a masked `|| true` command is labelled `UNTRUSTED`.
 
+## MCP server
+
+`.mcp.json` runs **this checkout** (`.venv/bin/python -m protect_context mcp` with
+`PYTHONPATH=src`), so an MCP client pointed at the project sees the 14 tools in
+the working tree. Do not point it back at `uvx protect-context mcp`: that serves
+the published wheel, which is a *different* surface under the same version
+string whenever unreleased work is in the tree (2026-11-11: PyPI 3.3.1 had 13
+tools and no `guard_brief`). Users of the published package should use `uvx`;
+contributors testing unreleased work must not. Changing the entry changes its
+definition hash, so the owner has to re-approve the project server once.
+
 ## Pull requests
 
 - Run `.venv/bin/pytest -q` and `npm run check`.

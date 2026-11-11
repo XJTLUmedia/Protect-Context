@@ -2,7 +2,42 @@
 
 ## Unreleased
 
-The brief is no longer extension-only, and the store travels with the repo.
+The brief is no longer extension-only, the store travels with the repo, and the
+Mandarin half of the promise now works.
+
+- **中文 is searchable, and the search no longer answers itself.** Two defects
+  shipped together because fixing one exposed the other. (1) `word_hit` required
+  a word start, which Chinese never has: in `…在生产库上…` every neighbour of a
+  match is a letter, so a query for `生产库` returned 0 rows against a row that
+  literally contains it. A non-ASCII keyword now matches as a substring, keyed
+  on the *keyword* so the ASCII mid-word guard (`arch` never reaches `search`,
+  `表格old` never answers `old`) is untouched in both runtimes. (2) The store
+  records the query a search ran, and indexing those rows let a query answer
+  itself — on the real store a 中文 query returned four hits and every one of
+  them was a command that ran that query. Search tools are no longer indexed as
+  reuse hints (`QUERY_TOOLS` in `recall.py`/`recall.ts`). Cross-lingual
+  paraphrase stays out of scope and is documented as such.
+- **Owner intent reads Chinese.** The English patterns anchor on `\b`, which has
+  no meaning between Chinese characters, so `我要求…`, `不要再…`, `记住…` all
+  detected nothing in both runtimes: the correction was stored and then
+  invisible to the view that exists to surface it. A parallel 中文 pattern set
+  now runs beside the English one, with the same attribution rule (a bare
+  `必须`/`不要` counts only for owner-typed text) and the same ordering, plus
+  `「」`/`『』` treated as quotations.
+- **Contract ids agree across surfaces, and survive 中文.** `/guard-contract add`
+  wrote a bare number (`13`) while the CLI wrote `13-never-deploy-on-fridays` for
+  the same rule, so one store held two id formats. The extension now slugs like
+  the CLI does. Text whose ASCII remnant says nothing keeps its own characters:
+  `永远不要在生产库执行破坏性 SQL` becomes `13-永远不要在生产库-sql`, not `13-sql`.
+  English ids are byte-identical to before.
+- **`.mcp.json` runs this checkout, not the published wheel.** It pointed at
+  `uvx protect-context mcp`, which serves PyPI 3.3.1 — the same version string as
+  this tree but an older surface (13 tools, no `guard_brief`), so every MCP
+  client reading the project file tested the artifact instead of the code. It
+  now runs `.venv/bin/python -m protect_context mcp` against `src`; a stdio
+  handshake against that exact entry lists 14 tools including `guard_brief`.
+  The published entry needs re-approval, since the definition hash changed.
+- **`PC diff · error: fatal: …` no longer doubles the prefix.**
 
 - **One brief, three surfaces, byte-identical.** `buildBrief` moved out of
   `index.ts` into `extension/lib/brief_source.ts`, and `protect_context.brief`

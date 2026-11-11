@@ -89,6 +89,13 @@ built-in defaults  <  ~/.config/protect-context/  <  .agent-guard/
   under its own store lease, so two projects never share the wrong lock.
 - Removing a personal id needs `--global`; a project-scope remove reports that
   the id lives in the personal layer instead of deleting it.
+- Ids are `NN-<slug>` and identical on both surfaces (2026-11-11). The pi
+  surface used to write a bare number (`13`) while the CLI wrote `13-never-run-…`
+  for the same rule, so one store held two id formats and a remove had to know
+  which surface created the row. The slug is the first four ASCII words; text
+  whose ASCII remnant says nothing keeps its own characters instead
+  (`永远不要在生产库执行破坏性 SQL` -> `13-永远不要在生产库-sql`, not `13-sql`).
+  English text keeps byte-identical ids.
 
 ### Store row rules
 
@@ -151,6 +158,12 @@ exactly one call is outstanding, so an overlap is never guessed), with
 `read`/`edit`/search call records the path or pattern it touched) so a repeated
 chore reuses what already worked instead of re-deriving it. Only `bash` and
 `guard_verify` rows may form a loop streak; reuse keys are paths, not commands.
+Search tools are not indexed (`QUERY_TOOLS` in `recall.py`, mirrored in
+`recall.ts`): the key a search records is the query itself, so indexing it let a
+query answer itself — for any wording the store had not seen before, the echo of
+the search was rank 1 and carried no knowledge (2026-11-11: a 中文 query returned
+four rows and every one was a command that ran that query). A reuse hint points
+at content, never at a question.
 
 Ledger reads are memoized against per-segment `(name, mtime_ns, size)` stamps
 (`store.read_jsonl`, `verify._valid_runs`), so a repeat read costs one `stat`
@@ -222,6 +235,17 @@ recorded reuse count was ignored.
   mirrored in `extension/lib/stem.ts`), chosen over Porter because Porter
   collapses `organization` to `organ` and starts answering `organic`. The
   mid-word guard is unchanged: `arch` still never reaches `search`.
+- **Non-Latin keywords (2026-11-11).** A keyword that is not pure ASCII matches
+  as a plain substring. Scripts written without spaces have no word start to
+  anchor on: in `…在生产库上…` every neighbour of a match is a letter, so the
+  boundary rule returned nothing for a query the store literally contained
+  (measured: `生产库` matched 0 rows). The mid-word noise the rule prevents
+  (`arch` in `search`) needs an ASCII word structure that Chinese does not have,
+  so the relaxation is keyed on the *keyword*, not on the haystack — an ASCII
+  keyword still never matches mid-word, even next to a 中文 character
+  (`表格old` does not answer `old`). Cross-lingual paraphrase remains out of
+  scope: a 中文 query does not reach an English row claiming the same rule, and
+  no embedding model is involved.
 - **Scoring.** BM25 (`k1 = 1.5`, `b = 0.75`) in integer thousandths, with the
   Lucene IDF `ln(1 + (N - df + 0.5) / (df + 0.5))`. Term frequency saturates and
   is normalised by row length against the corpus average. Both runtimes compute
@@ -254,7 +278,15 @@ rows carrying `owner-want` / `owner-need` / `owner-preference` /
 tag cap). Text the owner typed themselves needs no attribution — a leading
 imperative or first-person want is enough — while journal prose the agent
 writes still requires an `owner`/`user` attribution, so the agent's own "I want
-to check" is never captured as owner intent. Rows render as
+to check" is never captured as owner intent. Chinese is matched by a parallel
+pattern set in both runtimes (`_CJK_INTENT_PATTERNS` / `_CJK_OWNER_AUTHORED` in
+`journal.py`, `CJK_INTENT_PATTERNS` / `CJK_OWNER_AUTHORED` in `journal.ts`):
+`\b` has no meaning between Chinese characters, so the English patterns alone
+left every 中文 statement untyped — stored, then invisible to the view
+(2026-11-11). `我要求/我希望/我需要/最好/不要再/必须/…错了/我说的是` are recognised,
+with the same attribution rule: a bare 必须/不要 counts only for owner-typed
+text. Quotation marks are blanked in both languages (`"…"`, `` `…` ``, `“…”`,
+`「…」`, `『…』`). Rows render as
 `<kind> · <ts> · <text> [provenance]` with per-kind counts and an
 `owner N · agent M` split, newest first, bounded to `READ_LIMIT_MAX` lines;
 `agent` provenance stays unverified. A read never writes and never creates
@@ -391,7 +423,7 @@ container disagreed with the developer venv in three ways:
 
 ## 7. Testing requirements
 
-Python (pytest, in `.venv`): store roundtrip + flock; contract CRUD + defaults identical to TS (12 ids + exact texts); fingerprint + loop streaks; numstat parser + verdicts; verify runner (uses `true`/`false` shell commands); budget math; orientation digest; CLI smoke for every verb (tmp HOME-cwd fixture so `.agent-guard` is created in a temp dir); **fastmcp in-memory Client smoke over ALL 13 MCP tools**; cross-format: Python parses a TS-format events.jsonl fixture string.
+Python (pytest, in `.venv`): store roundtrip + flock; contract CRUD + defaults identical to TS (12 ids + exact texts); fingerprint + loop streaks; numstat parser + verdicts; verify runner (uses `true`/`false` shell commands); budget math; orientation digest; CLI smoke for every verb (tmp HOME-cwd fixture so `.agent-guard` is created in a temp dir); **fastmcp in-memory Client smoke over ALL 14 MCP tools**; cross-format: Python parses a TS-format events.jsonl fixture string.
 
 Cross-runtime: `tests/test_brief.py` writes one fixture store and asserts the Python brief equals the extension's byte for byte (skipped when `node` is unavailable), so a change to either renderer that is not mirrored fails the suite.
 
@@ -410,7 +442,7 @@ No network/LLM calls. Not a sandbox. Not an auto-fixer. No secrets in the store.
 ## 10. Definition of Done
 
 1. pytest green (all suites) AND node tests green — twice consecutively.
-2. All 13 MCP tools callable via fastmcp client smoke.
+2. All 14 MCP tools callable via fastmcp client smoke.
 3. Extension module compiles under jiti semantics (typecheck best-effort documented) and lib tests pass on node 22.
 4. README complete with the 12-goal mapping.
 5. git repo initialized with one conventional initial commit (`.gitignore`: `.agent-guard/`, `.venv/`, `__pycache__/`, `node_modules/`).
