@@ -599,3 +599,16 @@ test("recall: a one-character 中文 query does not guess", () => {
   const hits = searchRows(rows, [], { query: "库" }).hits;
   assert.deepEqual(hits.map((hit) => hit.text), ["在生产库执行破坏性 SQL"]);
 });
+
+test("glossary: the dictionary widens the bridge", () => {
+  // Mirrors tests/test_recall.py::test_the_dictionary_widens_the_bridge.
+  assert.ok(translationsOf("deadlock").includes("死锁"));
+  assert.ok(translationsOf("死锁").includes("deadlock"));
+  assert.ok(translationsOf("firewall").includes("防火墙"));
+  // Curated first: the domain pair leads, dictionary senses follow.
+  assert.deepEqual(translationsOf("生产库").slice(0, 2), ["production", "production database"]);
+  // Capped, so one word cannot fan out across the dictionary.
+  assert.ok(translationsOf("cache").length <= 6);
+  // The one-character guard survives the wider table.
+  assert.deepEqual(translationsOf("库"), []);
+});
