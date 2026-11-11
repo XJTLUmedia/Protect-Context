@@ -68,4 +68,13 @@ DEFAULT_CONFIG: dict = {
     "brief_max_precedents": 3,
     "risk_confirm": True,
     "preflight_tools": ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
+    # A correction may carry the command that proves it still holds
+    # (`guard_note correction "…" --check "npm run check"`). The brief runs at
+    # most `brief_check_max` of them at session start and reports HONORED /
+    # VIOLATED / TIMEOUT. This executes store content, so the knob is public,
+    # the deadline is a timeout rather than a hope, and the brief always prints
+    # the command it ran. False disables execution and prints the commands only.
+    "brief_checks": True,
+    "brief_check_max": 3,
+    "brief_check_timeout_s": 5,
 }

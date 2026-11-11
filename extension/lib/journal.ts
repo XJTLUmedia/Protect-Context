@@ -19,6 +19,9 @@ export interface JournalEntry {
   type: JournalType;
   text: string;
   tags: string[];
+  /** Correction only: the shell command that proves the rule still holds. The
+   *  brief runs it (bounded, timed out) and labels HONORED / VIOLATED. */
+  check?: string;
 }
 
 export function isJournalType(v: unknown): v is JournalType {
@@ -316,9 +319,18 @@ function ensureIds(cwd: string): void {
   }
 }
 
+/** A check is one shell command, not a script: one line, bounded length. */
+export const CHECK_CAP = 200;
+
 export function appendJournal(
   cwd: string,
-  entry: { type: JournalType; text: string; tags?: string[]; session?: string | null },
+  entry: {
+    type: JournalType;
+    text: string;
+    tags?: string[];
+    session?: string | null;
+    check?: string | null;
+  },
 ): JournalEntry {
   // Runtime validation, not just the type: tool parameters can arrive as
   // unvalidated strings, and a row with an unknown type is ignored by every
@@ -330,6 +342,14 @@ export function appendJournal(
   }
   const cleanText = sanitizeJournalText(entry.text);
   if (cleanText === "") throw new Error("journal text must not be blank");
+  // A check proves a correction; anywhere else it would execute with nothing to
+  // prove (mirrors journal.add).
+  const cleanCheck = entry.check === null || entry.check === undefined
+    ? ""
+    : sanitizeJournalText(entry.check, CHECK_CAP);
+  if (cleanCheck !== "" && entry.type !== "correction") {
+    throw new Error("check applies to a correction");
+  }
   const supplied = typeof entry.text === "string" ? entry.text.length : 0;
   if (supplied > cleanText.length) {
     journalLog.warn(
@@ -355,6 +375,7 @@ export function appendJournal(
     session: entry.session ?? null,
     text: cleanText,
     tags: mergeIntentTags(cleanText, tags),
+    ...(cleanCheck === "" ? {} : { check: cleanCheck }),
   };
   appendJsonl(journalPath(cwd), full);
   return full;

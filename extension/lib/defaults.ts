@@ -29,6 +29,12 @@ export interface GuardConfig {
   brief_mode: "changed" | "always";
   /** How many `lesson` precedents the brief re-injects (0 disables it). */
   brief_max_precedents: number;
+  /** Run correction checks at session start (false prints them without running). */
+  brief_checks: boolean;
+  /** How many correction checks one brief runs (0 disables execution). */
+  brief_check_max: number;
+  /** Deadline for one check, in seconds. */
+  brief_check_timeout_s: number;
   risk_confirm: boolean;
   preflight_tools: string[];
 }
@@ -125,6 +131,12 @@ export const DEFAULT_CONFIG: GuardConfig = {
   ctx_warn_pct: 70,
   brief_mode: "changed",
   brief_max_precedents: 3,
+  // A correction may carry the command that proves it still holds; the brief
+  // runs at most this many and labels HONORED / VIOLATED / TIMEOUT. This
+  // executes store content, so the knob is public and the command is printed.
+  brief_checks: true,
+  brief_check_max: 3,
+  brief_check_timeout_s: 5,
   risk_confirm: true,
   preflight_tools: ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
 };

@@ -331,3 +331,23 @@ def test_detect_intent_reads_chinese_statements():
     assert journal.detect_intent("必须重新运行整套测试", True) == ["owner-constraint"]
     # Quoted 中文 is about the owner's words, not an expression of them.
     assert journal.detect_intent("他说「不要提交」", True) == []
+
+
+def test_a_correction_can_carry_the_check_that_proves_it():
+    """The store can hold the command that proves a correction still holds.
+
+    Without it "did the correction change behaviour" was unanswerable next
+    session: the correction was recorded and never tested.
+    """
+    entry = journal.add("correction", "split changes over 400 lines", check="true")
+    assert entry["check"] == "true"
+    assert store.read_jsonl(store.journal_path())[-1]["check"] == "true"
+
+    # The field is one line: a second line would be a shell script, not a check.
+    multiline = journal.add("correction", "no publish", check="echo a\necho b")
+    assert multiline["check"] == "echo a echo b"
+
+    # A check on anything but a correction would execute with nothing to prove.
+    with pytest.raises(ValueError):
+        journal.add("note", "a note", check="true")
+    assert "check" not in journal.add("note", "a note without a check")

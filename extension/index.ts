@@ -1377,13 +1377,21 @@ const startTimes = new Map<
       }),
       text: Type.String({ description: "What happened / what was decided" }),
       tags: Type.Optional(Type.Array(Type.String({ description: "Optional tags" }))),
+      check: Type.Optional(
+        Type.String({
+          description:
+            "Correction only: one-line shell command that proves the correction still holds. " +
+            "The brief runs it at session start (bounded, timed out) and labels HONORED / VIOLATED.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const entry = appendJournal(ctx.cwd, {
         type: params.type,
         text: params.text,
         session: session.id,
-            tags: tagsWithRequired(params.tags ?? [], "agent"),
+        check: params.check ?? null,
+        tags: tagsWithRequired(params.tags ?? [], "agent"),
       });
       return {
         content: [

@@ -223,7 +223,7 @@ def cmd_contract(args: argparse.Namespace) -> int:
 
 def cmd_note(args: argparse.Namespace) -> int:
     try:
-        entry = journal.add(args.type, args.text, _tags(args.tags))
+        entry = journal.add(args.type, args.text, _tags(args.tags), getattr(args, "check", ""))
     except ValueError as e:
         _emit(f"PC error: {e}")
         _emit(NUDGE_ERROR)
@@ -375,6 +375,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("type", choices=list(store.JOURNAL_TYPES))
     sp.add_argument("text")
     sp.add_argument("--tags", default="", help="comma-separated tags")
+    sp.add_argument(
+        "--check",
+        default="",
+        help="correction only: shell command that proves it still holds; the brief runs it",
+    )
     sp.set_defaults(func=cmd_note)
 
     sp = sub.add_parser("journal", help="read recent journal entries")

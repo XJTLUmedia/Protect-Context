@@ -40,6 +40,17 @@ export function mergeConfig(
   if (isInteger(p.brief_max_precedents) && p.brief_max_precedents >= 0 && p.brief_max_precedents <= 10) {
     cfg.brief_max_precedents = p.brief_max_precedents;
   }
+  if (typeof p.brief_checks === "boolean") cfg.brief_checks = p.brief_checks;
+  if (isInteger(p.brief_check_max) && p.brief_check_max >= 0 && p.brief_check_max <= 20) {
+    cfg.brief_check_max = p.brief_check_max;
+  }
+  if (
+    isInteger(p.brief_check_timeout_s) &&
+    p.brief_check_timeout_s >= 1 &&
+    p.brief_check_timeout_s <= 30
+  ) {
+    cfg.brief_check_timeout_s = p.brief_check_timeout_s;
+  }
   if (typeof p.risk_confirm === "boolean") cfg.risk_confirm = p.risk_confirm;
   const tools = strArray(p.preflight_tools);
   if (tools) cfg.preflight_tools = [...tools];

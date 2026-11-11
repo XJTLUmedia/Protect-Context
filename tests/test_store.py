@@ -26,6 +26,11 @@ EXPECTED_CONFIG = {
     # Added with the precedents work: brief re-injection cap for `lesson` rows
     # (0 disables the section). Pinned here and in extension/test/store.test.ts.
     "brief_max_precedents": 3,
+    # 2026-11-11 amendment: a correction may carry the command that proves it
+    # still holds. Pinned here and in extension/test/store.test.ts.
+    "brief_checks": True,
+    "brief_check_max": 3,
+    "brief_check_timeout_s": 5,
     "risk_confirm": True,
     "preflight_tools": ["git", "python3", "pip", "node", "npm", "rg", "pytest"],
 }

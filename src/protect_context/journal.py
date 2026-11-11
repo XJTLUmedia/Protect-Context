@@ -164,6 +164,8 @@ NUDGE_BY_TYPE = {
 # (measured on this repo's own journal: 35/50 rows at the cap, 31 mid-word).
 # 4000 keeps a full decision with its rationale while still bounding the brief.
 TEXT_CAP = 4000
+# A check is a single shell command, not a script: one line, bounded length.
+CHECK_CAP = 200
 TAG_COUNT_CAP = 8
 TAG_TEXT_CAP = 40
 READ_LIMIT_DEFAULT = 5
@@ -321,6 +323,17 @@ def _supplied_tag(tags: object, wanted: str) -> bool:
     return any(_normalise_text(tag, TAG_TEXT_CAP).casefold() == wanted for tag in candidates)
 
 
+def _normalise_check(value: object) -> str:
+    """The one-line proving command attached to a correction ("" when absent).
+
+    Same sanitiser as journal text, so a check cannot smuggle a control
+    character or a second line into the store the brief will execute.
+    """
+    if value is None or value is False:
+        return ""
+    return _normalise_text(value, CHECK_CAP)
+
+
 def _validate_type(jtype: str | None) -> None:
     if jtype is not None and jtype not in store.JOURNAL_TYPES:
         raise ValueError(
@@ -426,12 +439,20 @@ def _next_seq() -> int:
     return seq
 
 
-def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
-    """Append a cleaned journal entry; reject unknown types and blank text."""
+def add(jtype: str, text: str, tags: list[str] | None = None, check: object = None) -> dict:
+    """Append a cleaned journal entry; reject unknown types and blank text.
+
+    ``check`` attaches the command that proves a *correction* still holds. The
+    brief runs it at session start, so it is accepted only on a correction: a
+    check on a note or a risk would execute without anything to prove.
+    """
     _validate_type(jtype)
     clean_text = _normalise_text(text, TEXT_CAP)
     if not clean_text:
         raise ValueError("journal text must not be blank")
+    clean_check = _normalise_check(check)
+    if clean_check and jtype != "correction":
+        raise ValueError("check applies to a correction")
     supplied = len(str(text))
     notes: list[str] = []
     if supplied > len(clean_text):
@@ -457,6 +478,8 @@ def add(jtype: str, text: str, tags: list[str] | None = None) -> dict:
         "text": clean_text,
         "tags": clean_tags,
     }
+    if clean_check:
+        entry["check"] = clean_check
     # The row is written with the frozen four keys only; display notes are
     # attached to the returned copy afterwards, so they never reach disk.
     stored = dict(entry)

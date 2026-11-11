@@ -327,6 +327,17 @@ def guard_note(
             )
         ),
     ] = None,
+    check: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Correction only, optional. One-line shell command that proves "
+                "the correction still holds; the brief runs it at session start "
+                "and reports HONORED / VIOLATED / TIMEOUT. Rejected on any type "
+                "other than correction. Capped at 200 characters."
+            )
+        ),
+    ] = None,
 ) -> str:
     """Append one agent-authored journal entry.
 
@@ -337,13 +348,15 @@ def guard_note(
     `tags` is an optional list of strings, default None. The tag `agent` is
     always stored, so the entry stays unverified: it does not enter the trusted
     decisions or corrections the brief treats as owner input. Tag `lesson` to
-    make a precedent the brief can re-inject. It returns `logged <type> #N`,
+    make a precedent the brief can re-inject. `check` is optional and applies to
+    a correction only: it names the command that proves the rule still holds,
+    which the brief runs (bounded, timed out) and labels. It returns `logged <type> #N`,
     the stored tags, any normalization notes, and a Nudge. Side effects: appends
     one JSON line to `.agent-guard/journal.jsonl` and creates the store if
     needed. It does not change the contract or the evidence ledger.
     """
     try:
-        entry = journal.add(type, text, journal.tags_with_required(tags, "agent"))
+        entry = journal.add(type, text, journal.tags_with_required(tags, "agent"), check)
     except ValueError as e:
         return f"note: {e}\nNudge: pass non-blank text and a valid journal type."
     return journal.render_ack(entry, journal.count())

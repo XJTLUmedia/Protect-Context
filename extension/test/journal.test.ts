@@ -331,3 +331,36 @@ test("journal: detectIntent reads 中文 statements (mirrors Python)", () => {
   assert.deepEqual(detectIntent("必须重新运行整套测试", true), ["owner-constraint"]);
   assert.deepEqual(detectIntent("他说「不要提交」", true), []);
 });
+
+test("journal: a correction can carry the check that proves it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pc-journal-check-"));
+  try {
+    const entry = appendJournal(dir, {
+      type: "correction",
+      text: "split changes over 400 lines",
+      check: "true",
+    });
+    assert.equal(entry.check, "true");
+    assert.equal(readJournal(dir).at(-1)?.check, "true");
+
+    // One line: a second line would be a shell script, not a check.
+    const multiline = appendJournal(dir, {
+      type: "correction",
+      text: "no publish",
+      check: "echo a\necho b",
+    });
+    assert.equal(multiline.check, "echo a echo b");
+
+    // A check on anything but a correction would execute with nothing to prove.
+    assert.throws(
+      () => appendJournal(dir, { type: "note", text: "a note", check: "true" }),
+      /check applies to a correction/,
+    );
+    assert.equal(
+      appendJournal(dir, { type: "note", text: "no check" }).check,
+      undefined,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
