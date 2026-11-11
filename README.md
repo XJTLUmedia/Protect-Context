@@ -849,6 +849,20 @@ so an inflected query returned nothing at all. The stemmer is a conservative
 suffix stripper rather than Porter, because Porter turns `organization` into
 `organ` and starts answering `organic`.
 
+Chinese works at all now: a 中文 keyword matches inside an unsegmented run
+(`生产库` finds `…在生产库上…`), while an ASCII keyword keeps the strict
+word-start rule even next to Chinese (`表格old` does not answer `old`). Two rows
+that state the same rule in different languages were the remaining measured gap,
+and it is bridged by a **curated dictionary, not embeddings**:
+`src/protect_context/glossary.py` and `extension/lib/glossary.ts` hold the same
+table of English/中文 pairs (production ↔ 生产, production database ↔ 生产库,
+deploy ↔ 部署, evidence ↔ 证据, …). A query term is expanded to its counterparts
+at search time — the stored rows are untouched — and a hit reached only through
+the table is scaled to 0.6, so a literal row of the same rarity always outranks
+a translated one. A paraphrase outside the table still misses exactly as before;
+this is recall for written-down terms, not a translation model. A Python test
+parses the TypeScript file and fails if the two tables drift.
+
 Length no longer buys relevance: scoring is BM25, so term frequency saturates
 and each row is normalised against the corpus average. Measured on the fixtures
 in `tests/test_recall.py`, a 60-word filler row used to beat a precise 5-word

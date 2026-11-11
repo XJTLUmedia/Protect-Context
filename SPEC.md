@@ -1,6 +1,6 @@
 # SPEC — protect-context · Agent Guardrail Suite
 
-**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events; amended 2026-11-06: local `guard_recall` / `recall` over the retained JSONL window, no embeddings; amended 2026-11-09: `guard_intent` / `intent` owner-intent view — wants, needs, preferences, and corrections captured as `owner-*` tags, an intent-bearing owner prompt becoming a trusted journal row, ≤2 owner statements in the brief, and verify runs mirrored into `events.jsonl` with the evidence ledger authoritative for outcomes) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
+**Version:** 1.0 · **Status:** FROZEN 2026-08-28 (amended 2026-11-03: task anchor, unverified agent notes, `guard_journal` read tool, mid-run re-injection, `input`/`context` events; amended 2026-11-06: local `guard_recall` / `recall` over the retained JSONL window, no embeddings; amended 2026-11-09: `guard_intent` / `intent` owner-intent view — wants, needs, preferences, and corrections captured as `owner-*` tags, an intent-bearing owner prompt becoming a trusted journal row, ≤2 owner statements in the brief, and verify runs mirrored into `events.jsonl` with the evidence ledger authoritative for outcomes; amended 2026-11-11: a fixed English/中文 term bridge for recall, still no embeddings, and no change to the stored row format) · **Owner directive:** treat the 12 failure modes below as standing goals and build tooling (pi extension + MCP server + CLI) that measurably fixes or improves each, as far as possible.
 
 ## 0. Mission & principles
 
@@ -270,9 +270,9 @@ recorded reuse count was ignored.
   (`arch` in `search`) needs an ASCII word structure that Chinese does not have,
   so the relaxation is keyed on the *keyword*, not on the haystack — an ASCII
   keyword still never matches mid-word, even next to a 中文 character
-  (`表格old` does not answer `old`). Cross-lingual paraphrase remains out of
-  scope: a 中文 query does not reach an English row claiming the same rule, and
-  no embedding model is involved.
+  (`表格old` does not answer `old`). Cross-lingual paraphrase needed a learned
+  model, which this SPEC excludes; the deterministic half is now a curated term
+  bridge (below), not an embedding.
 - **Scoring.** BM25 (`k1 = 1.5`, `b = 0.75`) in integer thousandths, with the
   Lucene IDF `ln(1 + (N - df + 0.5) / (df + 0.5))`. Term frequency saturates and
   is normalised by row length against the corpus average. Both runtimes compute
@@ -291,6 +291,41 @@ recorded reuse count was ignored.
   (`min(uses, 8) * 10`) so a hint that already worked outranks an equivalent
   one-shot. The ledger stores a count, not per-use dates, so this is NOT ACT-R
   base-level activation; relevance always dominates.
+
+See README for the measured before/after on each defect.
+
+### Amendment 2026-11-11 — bilingual term bridge
+
+The 2026-11-11 non-Latin fix made a 中文 keyword match inside an unsegmented run,
+but two rows that state the same rule in different languages still shared no
+characters: a query for `生产库` could not reach "never run destructive SQL on the
+production database". Learned cross-lingual paraphrase stays out (no embeddings,
+no model, no network). What is added is the deterministic half:
+
+- **A curated dictionary, not a model.** `src/protect_context/glossary.py` and
+  `extension/lib/glossary.ts` hold one identical list of English/中文 term pairs
+  for the vocabulary this tool records (deploy/production/database/destructive,
+  contract/evidence/verify, commit/push/release, secret/token, …). A Python test
+  parses the TypeScript file and fails if the two lists differ.
+- **Applied at query time; the store is untouched.** Each query keyword is
+  expanded to its counterparts and a row may match any of them. Nothing is
+  translated on write, so the JSONL format is unchanged and an old store needs
+  no migration.
+- **One hop, script-matched.** A keyword is matched against the side of the pair
+  written in its own script, so a translation is never chained into a second
+  translation. English is matched by word start or shared stem; 中文 by substring
+  in either direction (so `生产` also reaches the `生产库` entry).
+- **Alternates are alternatives, not extra terms.** The query keeps its
+  AND-over-keywords shape and its floor: a translation satisfies the same term
+  the literal keyword would have.
+- **Literal still wins.** A hit reached only through the bridge is scaled by
+  `TRANSLATION_WEIGHT_MILLI = 600` (0.6) in both runtimes, so a literal row of
+  the same rarity outranks a translated one. IDF is computed from the literal
+  keyword only, so enabling a bridge never lowers the score of a row that
+  already matched literally.
+- **Bounded and stated.** Only the listed pairs bridge. A paraphrase outside the
+  table misses exactly as before; this is recall for written-down terms, not
+  translation.
 
 See README for the measured before/after on each defect.
 

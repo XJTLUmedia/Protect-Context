@@ -5,6 +5,19 @@
 The brief is no longer extension-only, the store travels with the repo, and the
 Mandarin half of the promise now works.
 
+- **A 中文 query reaches an English row that states the same rule.** The
+  previous release could match 中文 inside a Chinese row and nothing else, so
+  `生产库` still missed "never run destructive SQL on the production database":
+  no shared characters. Learned cross-lingual paraphrase needs an embedding
+  model, which SPEC excludes, so this is the deterministic half — a curated
+  English/中文 term table (`glossary.py` / `glossary.ts`) applied at query time.
+  A term is expanded to its counterparts and a row may match any of them;
+  nothing is translated on write, so the stored format and every existing store
+  are unchanged. A hit reached only through the table is scaled to 0.6, so a
+  literal row of the same rarity always outranks a translated one, and IDF still
+  describes the literal keyword, so no literal score moves. Only the listed
+  pairs bridge — an unknown paraphrase misses exactly as before — and a Python
+  test parses the TypeScript table so the two lists cannot drift.
 - **中文 is searchable, and the search no longer answers itself.** Two defects
   shipped together because fixing one exposed the other. (1) `word_hit` required
   a word start, which Chinese never has: in `…在生产库上…` every neighbour of a
