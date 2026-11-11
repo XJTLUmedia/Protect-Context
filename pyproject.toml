@@ -73,5 +73,10 @@ protect-context-typer = "protect_context.typer_cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The English/中文 term bridge is data, not code: the generated table ships
+# inside the package so `pip install` gets the same bytes the repo reads.
+[tool.setuptools.package-data]
+protect_context = ["lexicon.tsv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

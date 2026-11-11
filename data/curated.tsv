@@ -1,0 +1,64 @@
+# Curated English/中文 term pairs for recall, highest confidence first.
+# Hand-maintained: these come from the vocabulary this tool actually records,
+# and they are returned before any dictionary counterpart.
+# Format: english<TAB>中文   (one pair per line; blank lines and # ignored)
+
+deploy	部署
+production	生产
+production database	生产库
+database	数据库
+destructive	破坏性
+migration	迁移
+delete	删除
+rollback	回滚
+backup	备份
+test	测试
+check	检查
+verify	验证
+audit	审计
+review	审查
+approve	批准
+reject	拒绝
+commit	提交
+push	推送
+branch	分支
+merge	合并
+release	发布
+publish	发布
+version	版本
+contract	契约
+constraint	约束
+rule	规则
+spec	规范
+evidence	证据
+session	会话
+journal	日志
+memory	记忆
+recall	召回
+search	检索
+diff	差异
+secret	密钥
+token	令牌
+password	密码
+file	文件
+config	配置
+store	存储
+security	安全
+dependency	依赖
+install	安装
+fix	修复
+bug	缺陷
+document	文档
+network	网络
+offline	离线
+error	错误
+failure	失败
+loop	循环
+task	任务
+plan	计划
+report	报告
+summary	摘要
+clean	清理
+code	代码
+project	项目
+split	拆分
