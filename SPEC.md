@@ -291,6 +291,17 @@ recorded reuse count was ignored.
   (`min(uses, 8) * 10`) so a hint that already worked outranks an equivalent
   one-shot. The ledger stores a count, not per-use dates, so this is NOT ACT-R
   base-level activation; relevance always dominates.
+- **Questions are not answers (2026-11-11).** A row that records the *query* is
+  dropped from the corpus: a `guard_recall` tool row, a shell row that talks to
+  this project's own recall surface (`protect-context recall …`, or
+  `from protect_context import recall` inside a `python -c` one-liner), and a
+  `guard_verify` row whose stored command is such an invocation. Measured on the
+  real store: the probe command that ran a query ranked first or second in all
+  four of its own result sets, and two verify rows outranked the entries they
+  were searching for — the search looked like it had found something when the
+  store held only the question. A path such as
+  `src/protect_context/recall.py` still indexes: a file is content, and the
+  trailing dot is what tells the two apart.
 
 See README for the measured before/after on each defect.
 

@@ -5,6 +5,19 @@
 The brief is no longer extension-only, the store travels with the repo, and the
 Mandarin half of the promise now works.
 
+- **The search no longer answers its own question.** The same rule that covered a
+  `guard_recall` tool row now covers the shell: a command that talks to this
+  project's own recall surface, and a `guard_verify` row whose stored command is
+  such a call, are dropped from the corpus. Measured on the real store: the probe
+  command that ran a query ranked first or second in all four of its own result
+  sets, and `ev-0207`/`ev-0208` — verify rows whose commands ran a recall —
+  outranked the entries they were searching for. Only the recall surface is
+  treated this way; `grep -rn "production database" deploy/` and
+  `src/protect_context/recall.py` still index as reusable hints.
+- **A one-character 中文 keyword does not bridge.** Chinese substring matching
+  runs in either direction, so `库` reached both `数据库` and `生产库` and then
+  English rows for each — a guess, not a lookup. A keyword shorter than two
+  characters stays a literal substring match; `生产库` still bridges.
 - **A 中文 query reaches an English row that states the same rule.** The
   previous release could match 中文 inside a Chinese row and nothing else, so
   `生产库` still missed "never run destructive SQL on the production database":
