@@ -129,9 +129,39 @@ export function nextConstraintId(constraints: Constraint[]): string {
   let max = 0;
   for (const c of constraints) {
     const m = c.id.match(/^(\d+)(?:-|$)/);
-    if (m) max = Math.max(max, Number(m[1]));
+    if (m && m[1] !== undefined) max = Math.max(max, Number(m[1]));
   }
   return String(max + 1).padStart(2, "0");
+}
+
+/** Slug limits, mirrored from contract.py (MAX_SLUG / MIN_SLUG / MAX_CJK_SLUG). */
+export const MAX_SLUG = 40;
+const MIN_SLUG = 4;
+const MAX_CJK_SLUG = 8;
+const CJK_RUN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+/g;
+
+/** A readable id fragment: ASCII words when they describe the text, the text's
+ *  own characters when they cannot.
+ *
+ *  This surface used to emit a bare number, so `/guard-contract add` wrote id
+ *  "13" while the CLI wrote "13-never-run-sql" for the same rule — two id
+ *  formats in one store, and `guard_contract remove` had to know which surface
+ *  created the row (measured 2026-11-11). Non-Latin text used to keep only its
+ *  ASCII remnant (永远不要…SQL -> "14-sql"), which told the owner nothing. */
+export function slugify(text: string): string {
+  const words = (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).slice(0, 4);
+  const asciiSlug = words.join("-").slice(0, MAX_SLUG).replace(/^-+|-+$/g, "");
+  const cjk = (text.match(CJK_RUN) ?? []).join("").slice(0, MAX_CJK_SLUG);
+  if (cjk === "") return asciiSlug === "" ? "constraint" : asciiSlug;
+  if (asciiSlug.length >= MIN_SLUG && words.length >= 2) {
+    return `${asciiSlug.slice(0, MAX_SLUG - cjk.length - 1)}-${cjk}`;
+  }
+  return asciiSlug === "" ? cjk : `${cjk}-${asciiSlug}`;
+}
+
+/** `NN-<slug>`, the id shape contract.py's `add` produces. */
+export function constraintId(number: string, text: string): string {
+  return `${number}-${slugify(text)}`;
 }
 
 export interface AddConstraintResult {
@@ -215,7 +245,7 @@ export function addConstraintWithStatus(
     const existing = effective.find((constraint) => normalizeOneLine(constraint.text, TEXT_CAP) === cleanText);
     if (existing) return { constraint: existing, added: false, total: effective.length };
     const constraint: Constraint = {
-      id: nextConstraintId(effective),
+      id: constraintId(nextConstraintId(effective), cleanText),
       text: cleanText,
       added: new Date().toISOString().slice(0, 10),
       source: normalizeOneLine(source, 40) || "agent",

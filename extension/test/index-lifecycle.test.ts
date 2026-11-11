@@ -513,8 +513,16 @@ test("index lifecycle: the extension exposes every read-only guard surface, and 
     const contract = await call("guard_contract");
     assert.match(contract, /^contract \(12\):/m);
     assert.match(contract, /01-obey-instructions/);
-    assert.match(await call("guard_contract", { action: "add", text: "prefer small diffs" }), /^contract: added 13 · 13 constraints$/m);
-    assert.match(await call("guard_contract", { action: "remove", text: "13" }), /^contract: removed 13$/m);
+    // The id carries the slug both surfaces now share, not a bare number.
+    assert.match(
+      await call("guard_contract", { action: "add", text: "prefer small diffs" }),
+      /^contract: added 13-prefer-small-diffs · 13 constraints$/m,
+    );
+    // Removal takes the full slugged id — the same string the CLI writes.
+    assert.match(
+      await call("guard_contract", { action: "remove", text: "13-prefer-small-diffs" }),
+      /^contract: removed 13-prefer-small-diffs$/m,
+    );
     assert.match(await call("guard_contract", { action: "remove", text: "99" }), /no project constraint '99'/);
 
     // Every surface ends with an actionable nudge, never a bare dump.

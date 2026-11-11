@@ -77,12 +77,16 @@ test("contract: personal-scope add writes the personal file and skips project du
   withPersonalLayer((userDir, cwd) => {
     const result = addConstraintWithStatus(cwd, "Personal rule.", "user", "user");
     assert.equal(result.added, true);
-    // The extension numbers ids bare ("13"); Python slugs them ("13-personal-rule").
-    assert.equal(result.constraint.id, "13", "ids continue after the project's 12 seeds");
+    // The extension used to number ids bare ("13") while Python slugged the same
+    // row ("13-personal-rule"), so one store held two id formats.
+    assert.ok(
+      result.constraint.id.startsWith("13-"),
+      "ids continue after the project's 12 seeds and carry the slug contract.py uses",
+    );
     const personal = JSON.parse(readFileSync(join(userDir, "contract.json"), "utf8")) as {
       constraints: { id: string }[];
     };
-    assert.deepEqual(personal.constraints.map((c) => c.id), ["13"]);
+    assert.deepEqual(personal.constraints.map((c) => c.id), ["13-personal-rule"]);
     assert.ok(!existsSync(contractPath(cwd)), "a personal write does not seed the project store");
 
     const duplicate = addConstraintWithStatus(cwd, "Personal rule.", "user", "project");

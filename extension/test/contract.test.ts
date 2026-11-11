@@ -11,7 +11,9 @@ import {
   addConstraintWithStatus,
   removeConstraint,
   contractLines,
+  constraintId,
   nextConstraintId,
+  slugify,
 } from "../lib/contract.ts";
 import { checkContractSummary, renderChecklist } from "../lib/contract_check.ts";
 import { DEFAULT_CONTRACT } from "../lib/defaults.ts";
@@ -60,13 +62,15 @@ test("contract: add/remove CRUD roundtrip", () => {
   const dir = tmpStore();
   try {
     const added = addConstraint(dir, "Never deploy on Fridays");
-    assert.equal(added.id, "13");
+    // Slugged like contract.py: the bare number was a cross-surface id split
+    // (`/guard-contract add` wrote "13", the CLI wrote "13-never-deploy-on").
+    assert.equal(added.id, "13-never-deploy-on-fridays");
     assert.equal(added.source, "agent");
     const raw = JSON.parse(readFileSync(join(dir, ".agent-guard", "contract.json"), "utf8"));
     assert.equal(raw.constraints.length, 13);
     assert.equal(nextConstraintId(raw.constraints), "14");
-    assert.ok(removeConstraint(dir, "13"));
-    assert.equal(removeConstraint(dir, "13"), false, "removing twice fails cleanly");
+    assert.ok(removeConstraint(dir, added.id));
+    assert.equal(removeConstraint(dir, added.id), false, "removing twice fails cleanly");
     assert.equal(loadContract(dir).constraints.length, 12);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -317,4 +321,15 @@ test("contract_check: 02 needs a trustworthy, cited run; 08 fails a huge diff", 
     lastEvidence: null,
   });
   assert.equal(item(huge, "08").addressed, false, "401 lines is a stop-and-split signal");
+});
+
+test("contract: a 中文 constraint keeps a meaningful id (mirrors Python)", () => {
+  // The ASCII slug rule reduced 中文 text to its ASCII remnant (14-sql), so two
+  // 中文 constraints read as "14-sql" and "15-sql" in every brief.
+  assert.equal(slugify("永远不要在生产库执行破坏性 SQL"), "永远不要在生产库-sql");
+  assert.equal(constraintId("14", "永远不要在生产库执行破坏性 SQL"), "14-永远不要在生产库-sql");
+  // English text keeps exactly the id it had before the fallback existed.
+  assert.equal(slugify("Always run pytest before committing"), "always-run-pytest-before");
+  // Mixed text keeps the ASCII words readable and appends the 中文 head.
+  assert.equal(slugify("永远不要在生产库执行 npm publish"), "npm-publish-永远不要在生产库");
 });

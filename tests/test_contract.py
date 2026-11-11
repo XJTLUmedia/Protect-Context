@@ -262,3 +262,18 @@ def test_render_is_bounded_but_keeps_seeds_and_newest_entries():
     assert "13-extra" not in text
     # header + omission disclosure + at most 24 constraint rows
     assert len(text.splitlines()) == 26
+
+
+def test_a_chinese_constraint_keeps_a_meaningful_id():
+    """The ASCII slug rule reduced 中文 text to its ASCII remnant (14-sql).
+
+    Two 中文 constraints then read as ``14-sql`` and ``15-sql`` in every brief:
+    the id identified neither the rule nor the difference between them.
+    """
+    c, _ = contract.add("永远不要在生产库执行破坏性 SQL")
+    assert c is not None
+    assert c["id"].startswith("13-")
+    assert "永远不要在生产" in c["id"]
+    assert c["id"].endswith("-sql")
+    # English text keeps exactly the id it had before the fallback existed.
+    assert contract._slug("Always run pytest before committing") == "always-run-pytest-before"

@@ -13,6 +13,11 @@ from . import layers, store
 from .defaults import DEFAULT_CONTRACT
 
 MAX_SLUG = 40
+# A slug below this carries no meaning on its own ("sql"), so text the ASCII
+# rule can barely describe falls back to its own characters.
+MIN_SLUG = 4
+MAX_CJK_SLUG = 8
+_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
 MAX_TEXT = 500  # free-text cap (parity with the extension): briefs re-inject it
 # SPEC §5: the extension's re-injected brief carries at most 12 seed/other
 # contract lines, plus at most 6 owner/user lines on their own additive budget.
@@ -207,8 +212,22 @@ def _num(cid: str) -> int:
 
 
 def _slug(text: str) -> str:
+    """A readable id fragment: ASCII words when they describe the text, the
+    text's own characters when they cannot.
+
+    Non-Latin text used to keep only its ASCII remnant — 永远不要在生产库执行破坏性
+    SQL became ``14-sql`` — so two 中文 constraints were indistinguishable in a
+    brief and the id said nothing about the rule (measured 2026-11-11). English
+    text keeps the exact ids it had.
+    """
     words = re.findall(r"[a-z0-9]+", text.lower())[:4]
-    return ("-".join(words)[:MAX_SLUG]).strip("-") or "constraint"
+    ascii_slug = ("-".join(words)[:MAX_SLUG]).strip("-")
+    cjk = "".join(_CJK_RUN.findall(text))[:MAX_CJK_SLUG]
+    if not cjk:
+        return ascii_slug or "constraint"
+    if len(ascii_slug) >= MIN_SLUG and len(words) >= 2:
+        return f"{ascii_slug[: MAX_SLUG - len(cjk) - 1]}-{cjk}"
+    return f"{cjk}-{ascii_slug}" if ascii_slug else cjk
 
 
 PROJECT_SCOPE = "project"
