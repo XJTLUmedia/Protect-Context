@@ -122,8 +122,9 @@ const IMPERATIVE_VERBS =
 /** Owner prompts are imperative and often open with a connective ("now reload
  *  X", "then fix Y"); the lead-in must not hide the verb that names the ask. */
 const LEAD_IN = "^(?:\\s*(?:please|now|then|also|and|next|first|so|ok|okay)\\b[,: ]*)*\\s*";
-/** Double-quoted and backticked spans are quotations, not statements. */
-const QUOTED = /"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d/g;
+/** Double-quoted and backticked spans are quotations, not statements.
+ *  「」/『』 are the Chinese equivalent of the quotation marks above. */
+const QUOTED = /"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d|\u300c[^\u300d]*\u300d|\u300e[^\u300f]*\u300f/g;
 
 /** Extra patterns that only apply to text the owner typed (mirrors Python's
  * `_OWNER_AUTHORED`): a first-person want or a leading imperative is the
@@ -149,6 +150,45 @@ const OWNER_AUTHORED: Record<IntentTag, RegExp> = {
   ),
 };
 
+/** Chinese pattern set. Chinese has no word boundaries, so `\b` is meaningless
+ *  and the English patterns never fired on the text the owner actually writes
+ *  (measured 2026-11-11: 我要求…, 不要再…, 记住… all returned [] in both
+ *  runtimes, so a 中文 correction was stored and then invisible to the intent
+ *  view). Mirrors journal._CJK_INTENT_PATTERNS; keep the two in sync. */
+const CJK_ATTR = "(?:我|我们|主人|用户)";
+const CJK_LEAD_IN =
+  "^(?:\\s*(?:请|麻烦|另外|然后|现在|接下来|还有|顺便|并且|同时)[,，、:： ]*)*\\s*";
+const CJK_INTENT_PATTERNS: Record<IntentTag, RegExp> = {
+  "owner-want": new RegExp(
+    // The gap excludes 需: otherwise 我需要 (“I need”) reaches the bare 要 and
+    // reports a want, which is the wrong kind (mirrors journal.py).
+    `${CJK_ATTR}[^\\n。；;需]{0,20}?(?:要|想要|要求|希望|需要你|麻烦你|请你|帮我|替我)`,
+  ),
+  "owner-need": new RegExp(`${CJK_ATTR}[^\\n。；;]{0,20}?(?:需要|必须有|离不开)|需要你`),
+  "owner-preference": new RegExp(
+    `${CJK_ATTR}[^\\n。；;]{0,20}?(?:更喜欢|倾向|偏好)|最好|优先用|建议`,
+  ),
+  "owner-constraint": new RegExp(
+    `${CJK_ATTR}[^\\n。；;]{0,20}?(?:不要|别|禁止|不得|不能|必须|只能|只允许|一律|永远)`,
+  ),
+  "owner-correction": new RegExp(
+    `(?:你|这|那|刚才|上面|前面)[^\\n。；;]{0,12}?(?:错了|不对|不是这样|搞错|理解错|弄错)` +
+      `|纠正|我说的是|我指的是|别再`,
+  ),
+};
+/** Bare 中文 imperatives that only count for text the owner typed (mirrors
+ *  `_CJK_OWNER_AUTHORED`): a bare 必须/不要 in agent prose is the agent's own
+ *  instruction, not the owner's. */
+const CJK_OWNER_AUTHORED: Record<IntentTag, RegExp> = {
+  "owner-want": new RegExp(`我要|我想要|我希望|我要求|我想|请你|麻烦你|帮我|替我|给我`),
+  "owner-need": new RegExp(`我需要|必须有|需要你|务必`),
+  "owner-preference": new RegExp(`最好|优先|建议|我喜欢|我倾向|我更喜欢|沿用`),
+  "owner-constraint": new RegExp(
+    `${CJK_LEAD_IN}(?:不要|别|禁止|不得|必须|务必|只能|只允许|一律|永远不要|绝不要)`,
+  ),
+  "owner-correction": new RegExp(`错了|不对|不是这样|搞错|理解错|弄错|纠正|我说的是|我指的是|别再`),
+};
+
 /** The owner-intent tags the text expresses, in INTENT_TAGS order.
  *
  * Deterministic and query-free. Attribution is required for wants/needs (an
@@ -162,13 +202,19 @@ const OWNER_AUTHORED: Record<IntentTag, RegExp> = {
  * Quoted text is blanked first: an entry that quotes the owner's words (or an
  * example string) is *about* intent, not an expression of it — the false
  * positive that pushed agent prose into the view the view exists to protect
- * (2026-11-10). */
+ * (2026-11-10).
+ *
+ * Chinese is matched by a parallel pattern set (CJK_INTENT_PATTERNS /
+ * CJK_OWNER_AUTHORED) because there is no word boundary to anchor on. Both sets
+ * are consulted per tag, so the result order stays INTENT_TAGS order. */
 export function detectIntent(text: unknown, ownerAuthored = false): IntentTag[] {
   const folded = normalizeOneLine(text, TEXT_CAP).toLowerCase().replace(QUOTED, " ");
   return INTENT_TAGS.filter(
     (tag) =>
       INTENT_PATTERNS[tag].test(folded) ||
-      (ownerAuthored && OWNER_AUTHORED[tag].test(folded)),
+      CJK_INTENT_PATTERNS[tag].test(folded) ||
+      (ownerAuthored &&
+        (OWNER_AUTHORED[tag].test(folded) || CJK_OWNER_AUTHORED[tag].test(folded))),
   );
 }
 

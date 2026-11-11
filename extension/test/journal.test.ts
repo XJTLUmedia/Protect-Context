@@ -312,3 +312,22 @@ test("journal: every entry carries a stable, citable id", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("journal: detectIntent reads 中文 statements (mirrors Python)", () => {
+  // The English patterns anchor on \b, which has no meaning between Chinese
+  // characters, so a 中文 correction was stored and never classified.
+  assert.deepEqual(detectIntent("我要求先拆小改动再提交，400 行以上必须拆分", true), [
+    "owner-want",
+    "owner-constraint",
+  ]);
+  assert.deepEqual(detectIntent("不要再把版本号和非版本改动混在一个提交里", true), [
+    "owner-constraint",
+  ]);
+  assert.deepEqual(detectIntent("最好先跑一遍完整测试再提交", true), ["owner-preference"]);
+  // 我需要 must read as a need, not reach the bare 要 and report a want.
+  assert.deepEqual(detectIntent("我需要两个运行时都通过", true), ["owner-need"]);
+  assert.deepEqual(detectIntent("主人要求每个改动都要有验证证据"), ["owner-want"]);
+  assert.deepEqual(detectIntent("必须重新运行整套测试"), []);
+  assert.deepEqual(detectIntent("必须重新运行整套测试", true), ["owner-constraint"]);
+  assert.deepEqual(detectIntent("他说「不要提交」", true), []);
+});

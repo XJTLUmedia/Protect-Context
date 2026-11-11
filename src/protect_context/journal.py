@@ -42,8 +42,11 @@ STATEMENT_KIND = "owner-statement"
 # Kinds the intent view renders, in display order. INTENT_TAGS are also the tags
 # detection may write; the statement kind exists only when reading.
 INTENT_KINDS = INTENT_TAGS + (STATEMENT_KIND,)
-# Double-quoted and backticked spans are quotations, not statements.
-_QUOTED = re.compile(r'"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d')
+# Double-quoted and backticked spans are quotations, not statements. 「」/『』
+# are the Chinese equivalent, and quoting is how a correction is usually passed on.
+_QUOTED = re.compile(
+    r'"[^"]*"|`[^`]*`|\u201c[^\u201d]*\u201d|\u300c[^\u300d]*\u300d|\u300e[^\u300f]*\u300f'
+)
 _ATTR = r"(?:owner|user)"
 _INTENT_PATTERNS = {
     # `\s` before the verb, not `\b`: prose that names the tag itself
@@ -105,6 +108,46 @@ _OWNER_AUTHORED = {
     ),
 }
 
+# Chinese has no word boundaries, so `\b` is meaningless and the English patterns
+# never fired on the text the owner actually writes (measured 2026-11-11: 我要求…,
+# 不要再…, 记住… all returned [] in both runtimes, so a 中文 correction was stored
+# and then invisible to the intent view). These mirror the English grammar: an
+# attribution variant for agent prose, a bare imperative variant for text the
+# owner typed themselves.
+_CJK_ATTR = r"(?:我|我们|主人|用户)"
+_CJK_LEAD_IN = r"^(?:\s*(?:请|麻烦|另外|然后|现在|接下来|还有|顺便|并且|同时)[,，、:： ]*)*\s*"
+_CJK_INTENT_PATTERNS = {
+    "owner-want": re.compile(
+        # The gap excludes 需: otherwise 我需要 (“I need”) reaches the bare 要 and
+        # reports a want, which is the wrong kind (found by the 中文 test).
+        rf"{_CJK_ATTR}[^\n。；;需]{{0,20}}?(?:要|想要|要求|希望|需要你|麻烦你|请你|帮我|替我)"
+    ),
+    "owner-need": re.compile(rf"{_CJK_ATTR}[^\n。；;]{{0,20}}?(?:需要|必须有|离不开)|需要你"),
+    "owner-preference": re.compile(
+        rf"{_CJK_ATTR}[^\n。；;]{{0,20}}?(?:更喜欢|倾向|偏好)|最好|优先用|建议"
+    ),
+    "owner-constraint": re.compile(
+        rf"{_CJK_ATTR}[^\n。；;]{{0,20}}?(?:不要|别|禁止|不得|不能|必须|只能|只允许|一律|永远)"
+    ),
+    "owner-correction": re.compile(
+        r"(?:你|这|那|刚才|上面|前面)[^\n。；;]{0,12}?(?:错了|不对|不是这样|搞错|理解错|弄错)"
+        r"|纠正|我说的是|我指的是|别再"
+    ),
+}
+# Only `owner_authored=True` uses these, exactly like _OWNER_AUTHORED: a bare
+# 必须/不要 in agent prose is the agent's own instruction, not the owner's.
+_CJK_OWNER_AUTHORED = {
+    "owner-want": re.compile(r"我要|我想要|我希望|我要求|我想|请你|麻烦你|帮我|替我|给我"),
+    "owner-need": re.compile(r"我需要|必须有|需要你|务必"),
+    "owner-preference": re.compile(r"最好|优先|建议|我喜欢|我倾向|我更喜欢|沿用"),
+    "owner-constraint": re.compile(
+        rf"{_CJK_LEAD_IN}(?:不要|别|禁止|不得|必须|务必|只能|只允许|一律|永远不要|绝不要)"
+    ),
+    "owner-correction": re.compile(
+        r"错了|不对|不是这样|搞错|理解错|弄错|纠正|我说的是|我指的是|别再"
+    ),
+}
+
 NUDGE_BY_TYPE = {
     "decision": "Nudge: re-read journal decisions before resuming work.",
     # Agent-written corrections are re-injected as unverified, never authority;
@@ -162,18 +205,28 @@ def detect_intent(text: object, owner_authored: bool = False) -> list[str]:
     example string) is *about* intent, not an expression of it — the false
     positive that pushed agent prose into the view the view exists to protect
     (2026-11-10).
+
+    Chinese is matched by a parallel pattern set (``_CJK_INTENT_PATTERNS`` /
+    ``_CJK_OWNER_AUTHORED``): there is no word boundary to anchor on, so `\b`
+    made every 中文 statement invisible. Both sets are consulted per tag, so the
+    returned order stays ``INTENT_TAGS`` order regardless of language.
     """
     folded = _normalise_text(text, TEXT_CAP).casefold()
     folded = _QUOTED.sub(" ", folded)
-    patterns = [
-        (tag, _INTENT_PATTERNS[tag], _OWNER_AUTHORED.get(tag) if owner_authored else None)
-        for tag in INTENT_TAGS
-    ]
-    return [
-        tag
-        for tag, attributed, first_person in patterns
-        if attributed.search(folded) or (first_person is not None and first_person.search(folded))
-    ]
+    hits: list[str] = []
+    for tag in INTENT_TAGS:
+        if _INTENT_PATTERNS[tag].search(folded) or _CJK_INTENT_PATTERNS[tag].search(folded):
+            hits.append(tag)
+            continue
+        if not owner_authored:
+            continue
+        relaxed = _OWNER_AUTHORED.get(tag)
+        cjk_relaxed = _CJK_OWNER_AUTHORED.get(tag)
+        if (relaxed is not None and relaxed.search(folded)) or (
+            cjk_relaxed is not None and cjk_relaxed.search(folded)
+        ):
+            hits.append(tag)
+    return hits
 
 
 def _entry_intent(entry: dict) -> list[str]:

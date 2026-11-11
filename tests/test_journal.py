@@ -303,3 +303,31 @@ def test_legacy_rows_get_ids_in_file_order_and_the_repair_is_idempotent():
     # A second write must not renumber anything.
     journal.add("note", "fifth")
     assert [row["id"] for row in store.read_jsonl(path)][-2:] == ["jn-0004", "jn-0005"]
+
+
+def test_detect_intent_reads_chinese_statements():
+    """中文 feedback was stored and never classified (measured 2026-11-11).
+
+    The English patterns anchor on ``\\b``, which has no meaning between Chinese
+    characters, so a 中文 correction reached the journal and stopped there: the
+    intent view reported "0 of 0 owner statements" while the correction sat one
+    row away.
+    """
+    assert journal.detect_intent("我要求先拆小改动再提交，400 行以上必须拆分", True) == [
+        "owner-want",
+        "owner-constraint",
+    ]
+    assert journal.detect_intent("不要再把版本号和非版本改动混在一个提交里", True) == [
+        "owner-constraint"
+    ]
+    assert journal.detect_intent("最好先跑一遍完整测试再提交", True) == ["owner-preference"]
+    # 我需要 must read as a need, not reach the bare 要 and report a want.
+    assert journal.detect_intent("我需要两个运行时都通过", True) == ["owner-need"]
+    # Attribution wording works for agent prose too, exactly like "the owner wants".
+    assert journal.detect_intent("主人要求每个改动都要有验证证据") == ["owner-want"]
+    # A bare imperative in agent prose is the agent's own instruction, not the
+    # owner's: it only counts for owner-typed text.
+    assert journal.detect_intent("必须重新运行整套测试") == []
+    assert journal.detect_intent("必须重新运行整套测试", True) == ["owner-constraint"]
+    # Quoted 中文 is about the owner's words, not an expression of them.
+    assert journal.detect_intent("他说「不要提交」", True) == []
