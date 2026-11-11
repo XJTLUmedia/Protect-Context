@@ -131,6 +131,16 @@ const SHELL_TOOLS = new Set(["bash", "guard_verify"]);
  *  the search was rank 1 and carried no knowledge (mirrors recall.py;
  *  QUERY_TOOLS, measured 2026-11-11). */
 const QUERY_TOOLS = new Set(["guard_recall"]);
+/** The same rule for shell rows: `protect-context recall "production database"`
+ *  is the question, and indexing it let the echo outrank the answer (measured
+ *  2026-11-11 on the real store). It is not only the CLI verb —
+ *  `from protect_context import recall` in a `python -c` one-liner is the same
+ *  question in another shape, and a guard_verify row stores that command. */
+const QUERY_COMMAND = /(?<![\w.-])(?:protect[-_]context|pc)\b[^\n]*\brecall\b(?!\.)/i;
+
+function isQueryCommand(cmd: string): boolean {
+  return QUERY_COMMAND.test(cmd);
+}
 
 interface CorpusRow {
   source: "journal" | "evidence" | "command" | "file";
@@ -413,6 +423,7 @@ function commandRows(events: unknown[]): CorpusRow[] {
     }
     if (record.kind !== "tool_call" || record.ok === false) continue;
     if (typeof record.cmd !== "string" || record.cmd.trim() === "") continue;
+    if (isQueryCommand(record.cmd)) continue;
     const key = normalizeCommand(record.cmd);
     if (key === "") continue;
     const tool = typeof record.tool === "string" ? record.tool : "";
@@ -731,6 +742,12 @@ export function searchRows(
     const parsed = asEvidence(row);
     if (parsed) corpus.push(parsed);
   }
+  // A recorded question is not an answer, whichever ledger it landed in: a
+  // guard_verify row stores the command that ran the query, so indexing it let
+  // it outrank the entries it was searching for. Same rule as commandRows.
+  const answerable = corpus.filter((row) => row.cmd === "" || !isQueryCommand(row.cmd));
+  corpus.length = 0;
+  corpus.push(...answerable);
   // Reuse beats rewriting: a query also reaches commands that already solved a
   // similar task. Not for an empty query (the recent window stays ledger-shaped)
   // and not when the same command is already evidence.

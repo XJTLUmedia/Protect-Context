@@ -137,6 +137,10 @@ export function translationsOf(keyword: string): string[] {
   const folded = keyword.toLowerCase();
   const found: string[] = [];
   const seen = new Set([folded]);
+  // A one-character keyword does not bridge: Chinese substring matching runs in
+  // either direction, so 库 would reach both 数据库 and 生产库 and then English
+  // rows for each. That is a guess, not a lookup. Literal matching is unchanged.
+  if (folded.trim().length < 2) return found;
   for (const [english, chinese] of PAIRS) {
     let candidate: string;
     if (termMatches(english, keyword)) candidate = chinese;

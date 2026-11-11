@@ -314,6 +314,25 @@ SHELL_TOOLS = frozenset(("bash", "guard_verify"))
 # a 中文 query returned 4 rows and every one was a command that ran that query).
 # A reuse hint must point at content, not at a question.
 QUERY_TOOLS = frozenset(("guard_recall",))
+# The same rule for shell rows: `protect-context recall "production database"`
+# is the question, and indexing it let the echo outrank the answer (measured
+# 2026-11-11 on the real store: the probe command that ran a query ranked first
+# or second in all four of its own result sets). It is not only the CLI verb —
+# `from protect_context import recall` in a `python -c` one-liner is the same
+# question in another shape, and a guard_verify row stores exactly that command,
+# so ev-0207/ev-0208 outranked the entries they were searching for. The rule is
+# therefore "this command talks to our own recall surface", not a verb spelling.
+# `(?!\.)` keeps a path (`src/protect_context/recall.py`) a reusable hint: a
+# file is content, and the dot is what tells the two apart.
+_QUERY_COMMAND = re.compile(
+    r"(?<![\w.-])(?:protect[-_]context|pc)\b[^\n]*\brecall\b(?!\.)",
+    re.IGNORECASE,
+)
+
+
+def _is_query_command(cmd: str) -> bool:
+    """True when the command is itself a recall of the store."""
+    return _QUERY_COMMAND.search(cmd) is not None
 
 
 def _file_rows(events: list[dict]) -> list[dict]:
@@ -418,6 +437,8 @@ def _command_rows(events: list[dict]) -> list[dict]:
             continue
         cmd = row.get("cmd")
         if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        if _is_query_command(cmd):
             continue
         key = store.fingerprint(cmd)
         if not key:
@@ -836,6 +857,11 @@ def search(
             parsed = _as_evidence(row)
             if parsed is not None:
                 corpus.append(parsed)
+    # A recorded *question* is not an answer, whichever ledger it landed in: a
+    # guard_verify row stores the command that ran the query, so indexing it let
+    # ev-0207/ev-0208 outrank the entries they were searching for. Same rule as
+    # _command_rows, applied once here for every non-shell source.
+    corpus = [row for row in corpus if not (row["cmd"] and _is_query_command(row["cmd"]))]
     # Reuse beats rewriting: a query also reaches commands that already solved a
     # similar task. Skipped without a query (the plain recent window stays
     # ledger-shaped) and skipped when the same command is already evidence.

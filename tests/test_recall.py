@@ -717,3 +717,78 @@ def test_the_glossary_mirrors_the_typescript_table():
         english, chinese = stripped.rstrip(",").strip("[]").split('", "')
         pairs.append((english.lstrip('"'), chinese.rstrip('"')))
     assert tuple(pairs) == glossary.PAIRS
+
+
+def test_a_recall_command_does_not_answer_its_own_query():
+    """The tool-row guard has a shell-row hole, and it was measured.
+
+    ``protect-context recall "production database"`` is the question. Indexing
+    it as a reusable command made the echo a hit for its own text — on the real
+    store the probe command ranked first or second in all four of its own
+    result sets, carrying no knowledge. A plain search command still indexes:
+    the fix must not blind the reuse ledger.
+    """
+    events = [
+        {
+            "kind": "tool_call",
+            "session": "s",
+            "tool": "bash",
+            "ok": True,
+            "ts": "2026-11-11T02:00:00Z",
+            "cmd": 'python -m protect_context recall "production database"',
+        },
+        {
+            "kind": "tool_call",
+            "session": "s",
+            "tool": "bash",
+            "ok": True,
+            "ts": "2026-11-11T02:01:00Z",
+            "cmd": "grep -rn 'production database' deploy/",
+        },
+        {
+            "kind": "tool_call",
+            "session": "s",
+            "tool": "bash",
+            "ok": True,
+            "ts": "2026-11-11T02:02:00Z",
+            # Same question in another shape: the surface, not the verb spelling.
+            "cmd": "python -c \"from protect_context import recall; recall.search('production database')\"",
+        },
+    ]
+    hits = recall.search(
+        "production database", journal_rows=[], evidence_rows=[], event_rows=events
+    ).hits
+    assert [h.kind for h in hits] == ["command"]
+    assert "grep" in hits[0].cmd
+    assert not any("recall" in h.cmd for h in hits)
+    # The same hole existed in the evidence ledger: guard_verify stores the
+    # command it ran, so verifying a recall made that verify row the top hit
+    # for the queried words (measured on the real store: ev-0207/ev-0208).
+    evidence = [
+        {"id": "ev-9001", "cmd": 'python -m protect_context recall "production database"'},
+        {"id": "ev-9002", "cmd": "grep -rn 'production database' deploy/"},
+    ]
+    found = recall.search(
+        "production database", journal_rows=[], evidence_rows=evidence, event_rows=[]
+    ).hits
+    assert [h.evidence_id for h in found] == ["ev-9002"]
+
+
+def test_a_one_character_chinese_query_does_not_guess():
+    """Chinese substring matching runs both ways, so 库 reaches 数据库 *and*
+    生产库 and would then bridge to English rows for each of them.
+
+    A single character is not a dictionary term: it stays an exact substring
+    match and is not translated. Two characters still bridge.
+    """
+    from protect_context import glossary
+
+    assert glossary.translations("库") == ()
+    assert glossary.translations("生产库") != ()
+    rows = [
+        {"ts": "t1", "type": "note", "text": "在生产库执行破坏性 SQL", "tags": []},
+        {"ts": "t2", "type": "note", "text": "Drop the production database.", "tags": []},
+    ]
+    # The literal Chinese row is still found; the English one is not invented.
+    hits = recall.search("库", journal_rows=rows, evidence_rows=[]).hits
+    assert [h.text for h in hits] == ["在生产库执行破坏性 SQL"]

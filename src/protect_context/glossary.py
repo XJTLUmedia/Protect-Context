@@ -139,11 +139,17 @@ def translations(keyword: str) -> tuple[str, ...]:
     """Counterparts of ``keyword`` in the other language, in table order.
 
     The keyword itself is never returned, so a pair whose sides differ only in
-    case cannot produce a self-match.
+    case cannot produce a self-match. A one-character keyword does not bridge:
+    Chinese substring matching runs in either direction, so ``库`` would reach
+    both ``数据库`` and ``生产库`` and then English rows for each — that is a
+    guess, not a lookup. Literal matching is unchanged, so ``库`` still finds
+    the Chinese rows that contain it.
     """
     folded = keyword.casefold()
     found: list[str] = []
     seen: set[str] = {folded}
+    if len(folded.strip()) < 2:
+        return tuple(found)
     for english, chinese in PAIRS:
         if term_matches(english, keyword):
             candidate = chinese

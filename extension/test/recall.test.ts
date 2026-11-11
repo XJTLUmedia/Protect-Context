@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { translationsOf } from "../lib/glossary.ts";
 import {
   LIMIT_MAX,
   RecallError,
@@ -560,4 +561,41 @@ test("recall: a 中文 query reaches the English row with the same rule", () => 
 
   const zhOne = searchRows(rows, [], { query: "破坏性" }).hits.map((hit) => hit.text);
   assert.deepEqual(zhOne, [chinese.text, english.text]);
+});
+
+test("recall: a recall command does not answer its own query", () => {
+  // Mirrors tests/test_recall.py. protect-context recall "…" is the question;
+  // indexing it as a reusable command made the echo a hit for its own text
+  // (rank 1-2 in all four of its own result sets, measured 2026-11-11).
+  const events = [
+    { ts: "t1", kind: "tool_call", session: "s", tool: "bash", ok: true, cmd: 'python -m protect_context recall "production database"' },
+    { ts: "t2", kind: "tool_call", session: "s", tool: "bash", ok: true, cmd: "grep -rn 'production database' deploy/" },
+    // Same question in another shape: the surface, not the verb spelling.
+    { ts: "t3", kind: "tool_call", session: "s", tool: "bash", ok: true, cmd: "python -c \"from protect_context import recall; recall.search('production database')\"" },
+  ];
+  const hits = searchRows([], [], { query: "production database" }, events).hits;
+  assert.deepEqual(hits.map((hit) => hit.kind), ["command"]);
+  assert.ok(hits[0]?.cmd?.includes("grep"));
+  assert.ok(!hits.some((hit) => hit.cmd?.includes("recall")));
+  // guard_verify stores the command it ran, so verifying a recall made the
+  // verify row the top hit for the queried words.
+  const evidence = [
+    { id: "ev-9001", cmd: 'python -m protect_context recall "production database"' },
+    { id: "ev-9002", cmd: "grep -rn 'production database' deploy/" },
+  ];
+  const found = searchRows([], evidence, { query: "production database" }).hits;
+  assert.deepEqual(found.map((hit) => hit.evidenceId), ["ev-9002"]);
+});
+
+test("recall: a one-character 中文 query does not guess", () => {
+  // Chinese substring matching runs both ways, so 库 reaches 数据库 *and* 生产库
+  // and would bridge to English rows for each. One character is not a term.
+  assert.deepEqual(translationsOf("库"), []);
+  assert.notDeepEqual(translationsOf("生产库"), []);
+  const rows = [
+    { ts: "t1", type: "note", text: "在生产库执行破坏性 SQL", tags: [] },
+    { ts: "t2", type: "note", text: "Drop the production database.", tags: [] },
+  ];
+  const hits = searchRows(rows, [], { query: "库" }).hits;
+  assert.deepEqual(hits.map((hit) => hit.text), ["在生产库执行破坏性 SQL"]);
 });
