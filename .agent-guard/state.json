@@ -85,7 +85,7 @@
     "01a1c8f1-f885-7003-bb87-bab6344e43b0": {
       "started": "2026-11-11T04:51:07.795Z",
       "git_head": "a75f65eb30bd3959af0f6a2d18cdc7b002904e99",
-      "brief_digest": "b30121c03538a5120c7ee84a2cb32e21eb6829f5",
+      "brief_digest": null,
       "notify_watermarks": {
         "ctx_pct": 0,
         "diff_lines": 800,
@@ -94,9 +94,7 @@
       "updated": "2026-11-11T05:34:02.170Z"
     }
   },
-  "counters": {
-    "orient_sha1": "3a6f40a32229f2d93a705f819fb97c77b97bc7e9"
-  },
+  "counters": {},
   "task": {
     "text": "I saw glossary ts is way too limited on certain words, can you please leverage open sourced language pack for npm to use all necessary words?",
     "source": "prompt",
