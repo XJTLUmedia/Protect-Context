@@ -192,10 +192,19 @@ def test_vendor_gitlinks_have_gitmodules_urls():
 
 
 def test_root_mcp_and_glama_listing_files():
+    """The project file must run THIS checkout, not the published wheel.
+
+    It pointed at `uvx protect-context mcp`, which serves PyPI 3.3.1 — the same
+    version string as this tree but an older surface (13 tools, no
+    `guard_brief`), so every MCP client pointed at the project tested the
+    artifact instead of the code (measured 2026-11-11).
+    """
     mcp = json.loads((ROOT / ".mcp.json").read_text())
     server = mcp["mcpServers"]["protect-context"]
-    assert server["command"] == "uvx"
-    assert server["args"] == ["protect-context", "mcp"]
+    assert server["command"] != "uvx", "the project file must not run the published wheel"
+    assert server["command"].endswith("python")
+    assert server["args"] == ["-m", "protect_context", "mcp"]
+    assert server["env"]["PYTHONPATH"] == "src"
     glama = json.loads((ROOT / "glama.json").read_text())
     assert glama["maintainers"] == ["XJTLUmedia"]
 
