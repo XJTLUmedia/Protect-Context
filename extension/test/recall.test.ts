@@ -533,3 +533,31 @@ test("recall: a search never answers itself", () => {
   const fileHits = searchRows([], [], { query: "recall.py" }, events).hits;
   assert.deepEqual(fileHits.map((hit) => hit.cmd), ["src/protect_context/recall.py"]);
 });
+
+test("recall: a 中文 query reaches the English row with the same rule", () => {
+  // Mirrors tests/test_recall.py. SPEC excludes embeddings, so the bridge is the
+  // curated dictionary in glossary.ts applied at query time; the stored rows are
+  // untouched. A literal row of the same rarity still ranks first (0.6 scale).
+  const english = {
+    ts: "t1",
+    type: "correction",
+    text: "Never run destructive SQL on the production database.",
+    tags: [],
+  };
+  const chinese = {
+    ts: "t2",
+    type: "correction",
+    text: "永远不要在生产库上执行破坏性 SQL 迁移",
+    tags: [],
+  };
+  const rows = [english, chinese];
+
+  const zh = searchRows(rows, [], { query: "生产库" }).hits.map((hit) => hit.text);
+  assert.deepEqual(zh, [chinese.text, english.text]);
+
+  const en = searchRows(rows, [], { query: "production database" }).hits.map((hit) => hit.text);
+  assert.deepEqual(en, [english.text, chinese.text]);
+
+  const zhOne = searchRows(rows, [], { query: "破坏性" }).hits.map((hit) => hit.text);
+  assert.deepEqual(zhOne, [chinese.text, english.text]);
+});

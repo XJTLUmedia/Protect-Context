@@ -33,6 +33,7 @@
 
 import { suppress } from "./dedup.ts";
 import { normalizeCommand } from "./fingerprint.ts";
+import { translationsOf } from "./glossary.ts";
 import { hasAgentTag, isJournalType, sanitizeTags, type JournalEntry } from "./journal.ts";
 import { stem as stemToken, countTokens, stems as stemSet } from "./stem.ts";
 import { eventsPath, journalPath, readJsonl, verifyRunsPath } from "./store.ts";
@@ -60,6 +61,13 @@ const CMD_SUB_WEIGHT = 1;
 // dates of each reuse, so there is no history to decay.
 const USES_BONUS_STEP = 10;
 const USES_BONUS_CAP = 8;
+
+// A keyword that reaches a row only through the bilingual glossary
+// (glossary.ts) is a weaker signal than a literal one: the dictionary is
+// curated, but it is still an inference. The term is scaled by 0.6 so a literal
+// row always outranks an equally rare translated one. Integer arithmetic keeps
+// this identical to recall.py.
+const TRANSLATION_WEIGHT_MILLI = 600;
 
 // BM25 saturation (k1) and length normalisation (b), in thousandths so the
 // arithmetic stays integer and Python's recall mirrors it to the unit.
@@ -577,10 +585,52 @@ function documentFrequencies(keywords: string[], keywordStems: string[], corpus:
   return counts;
 }
 
+/**
+ * Best hit for one query term, and whether it came from the glossary.
+ *
+ * The literal keyword is tried first so a row that contains it is never
+ * downgraded by a neighbour that also happens to be in the glossary. Alternates
+ * are alternatives for the same term, not extra required terms, so the query
+ * keeps its AND-over-terms shape.
+ */
+function groupHit(
+  keyword: string,
+  keywordStem: string,
+  alternates: string[],
+  alternateStems: string[],
+  row: CorpusRow,
+): { raw: number; translated: boolean } {
+  const raw = rawHit(keyword, keywordStem, canonicalEvidenceId(keyword), row);
+  if (raw > 0) return { raw, translated: false };
+  let best = 0;
+  alternates.forEach((alternate, index) => {
+    const candidate = rawHit(alternate, alternateStems[index] ?? "", null, row);
+    if (candidate > best) best = candidate;
+  });
+  return { raw: best, translated: best > 0 };
+}
+
+/** True when a tag (a deliberate synonym) matches the term or an alternate. */
+function tagReached(
+  tags: string[],
+  keyword: string,
+  stem: string,
+  alternates: string[],
+  alternateStems: string[],
+): boolean {
+  return tags.some(
+    (tag) =>
+      termHit(tag, keyword, stem) ||
+      alternates.some((alternate, index) => termHit(tag, alternate, alternateStems[index] ?? "")),
+  );
+}
+
 /** BM25 partial-match score, or null when the row is too weak. */
 function keywordScore(
   keywords: string[],
   keywordStems: string[],
+  alternates: string[][],
+  alternateStems: string[][],
   row: CorpusRow,
   idf: number[],
   length: number,
@@ -593,11 +643,14 @@ function keywordScore(
   let tagHit = false;
   keywords.forEach((keyword, index) => {
     const stem = keywordStems[index] ?? "";
-    const raw = rawHit(keyword, stem, canonicalEvidenceId(keyword), row);
+    const alt = alternates[index] ?? [];
+    const altStems = alternateStems[index] ?? [];
+    const { raw, translated } = groupHit(keyword, stem, alt, altStems, row);
     if (raw === 0) return;
     hits += 1;
-    if (row.tags.some((tag) => termHit(tag, keyword, stem))) tagHit = true;
-    score += bm25Term(idf[index] ?? 0, raw, length, average);
+    if (tagReached(row.tags, keyword, stem, alt, altStems)) tagHit = true;
+    const term = bm25Term(idf[index] ?? 0, raw, length, average);
+    score += translated ? Math.floor((term * TRANSLATION_WEIGHT_MILLI) / 1000) : term;
   });
   const floor =
     floorOverride ?? (keywords.length < MULTI_MATCH_FROM ? 1 : MULTI_MATCH_FLOOR);
@@ -664,6 +717,8 @@ export function searchRows(
   const bounded = boundedRecallLimit(query.limit);
   const keywords = keywordsOf(query.query);
   const keywordStems = keywords.map((keyword) => stemToken(keyword));
+  const alternates = keywords.map((keyword) => translationsOf(keyword));
+  const alternateStems = alternates.map((group) => group.map((alternate) => stemToken(alternate)));
   const wantedTags = requestedTags(query.tags);
   const cmdFilter = blankToNull(query.cmd, "recall cmd");
 
@@ -710,6 +765,8 @@ export function searchRows(
       const words = keywordScore(
         keywords,
         keywordStems,
+        alternates,
+        alternateStems,
         row,
         idf,
         lengths[seq] ?? 0,
