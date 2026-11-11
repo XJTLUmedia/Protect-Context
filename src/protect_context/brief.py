@@ -12,7 +12,9 @@ the tests all build through the same functions.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import unicodedata
 
 from . import contract as contract_mod
@@ -30,6 +32,10 @@ BRIEF_MAX_CORRECTIONS = 3
 BRIEF_MAX_UNVERIFIED_CORRECTIONS = 2
 BRIEF_MAX_AGENT_NOTES = 2
 BRIEF_MAX_LOOPS = 2
+# Correction checks (2026-11-11 amendment): how many run per brief, and the
+# default deadline when the config does not carry one.
+BRIEF_MAX_CHECKS = 3
+CHECK_TIMEOUT_DEFAULT_S = 5
 BRIEF_MAX_RECALL = 2
 BRIEF_MAX_INTENT = 2
 BRIEF_MAX_PRECEDENTS = 3
@@ -352,6 +358,19 @@ def build_brief(data: dict) -> str:
             kind = trunc_line(entry.get("type"), 16) or "entry"
             lines.append(f"- {kind}: {shown}{tag_s}")
 
+    checks = data.get("checks") or []
+    if checks:
+        lines.append("checks:")
+        for check in checks[:BRIEF_MAX_CHECKS]:
+            lines.append(
+                f"- {trunc_line(check.get('id'), 40) or '(no id)'}: "
+                f"{trunc_line(check.get('status'), 16)} · "
+                f"{trunc_line(check.get('cmd'), CMD_DISPLAY_MAX)}"
+            )
+    elif data.get("checks_disabled"):
+        # Silent disabling would make an unproved correction look checked.
+        lines.append("checks: not run (brief_checks=false) — commands are in guard_journal")
+
     loops = data.get("loops") or []
     if loops:
         lines.append("loops:")
@@ -461,7 +480,79 @@ def brief_inputs(cfg: dict | None = None) -> dict:
         "owner_intent": [entry for entry, _kinds in reversed(journal_mod.intent_classified(entries))],
         "loops": brief_loops,
         "last_evidence": last_evidence,
+        "checks": collect_checks(entries, cfg),
+        # A cap of 0 disables execution too: the brief must not imply a check
+        # ran when the budget forbade it.
+        "checks_disabled": not bool(cfg.get("brief_checks", True))
+        or _bounded_int(cfg.get("brief_check_max"), BRIEF_MAX_CHECKS, 0, 20) == 0,
     }
+
+
+def collect_checks(entries: list[dict], cfg: dict) -> list[dict]:
+    """Run the commands that prove recent corrections still hold.
+
+    A correction may carry ``check`` (``guard_note correction … --check CMD``).
+    This is the one place protect-context executes store content, so the rules
+    are deliberately narrow: only ``correction`` rows, newest first, at most
+    ``brief_check_max``, each killed at ``brief_check_timeout_s``, output
+    discarded (a proving command answers with its exit code, not its log), and
+    ``brief_checks = false`` turns execution off while still printing the
+    command. Returns ``[]`` when the owner disabled checks.
+    """
+    if not cfg.get("brief_checks", True):
+        return []
+    limit = _bounded_int(cfg.get("brief_check_max"), BRIEF_MAX_CHECKS, 0, 20)
+    if limit == 0:
+        return []
+    timeout = _bounded_int(cfg.get("brief_check_timeout_s"), CHECK_TIMEOUT_DEFAULT_S, 1, 30)
+    checks: list[dict] = []
+    for entry in reversed(entries):
+        if len(checks) >= limit:
+            break
+        if entry.get("type") != "correction":
+            continue
+        command = entry.get("check")
+        if not isinstance(command, str) or not command:
+            continue
+        checks.append(
+            {
+                "id": trunc_line(entry.get("id"), 40) or "(no id)",
+                "cmd": trunc_line(command, CMD_DISPLAY_MAX),
+                "status": _run_check(command, timeout),
+            }
+        )
+    return checks
+
+
+def _bounded_int(value: object, default: int, low: int, high: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return default
+    return max(low, min(value, high))
+
+
+def _run_check(command: str, timeout_s: int) -> str:
+    """HONORED / VIOLATED / TIMEOUT / ERROR — never raises, never blocks long."""
+    try:
+        # shell=True is BY DESIGN, exactly as in verify.py (SPEC §4): a check is
+        # a shell command the owner wrote (pipes, env prefixes, builtins) and it
+        # runs with the caller's own privileges. This is not a sandbox; the
+        # mitigating controls are the explicit --check flag, the correction-only
+        # rule, the cap, the timeout and the opt-out — not argument escaping.
+        # pi-lens-ignore: python-command-injection
+        completed = subprocess.run(  # noqa: S602
+            command,
+            shell=True,
+            cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"
+    except (OSError, ValueError):
+        return "ERROR"
+    return "HONORED" if completed.returncode == 0 else "VIOLATED"
 
 
 def compose_brief(cfg: dict | None = None) -> str:

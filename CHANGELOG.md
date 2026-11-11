@@ -37,6 +37,18 @@ Mandarin half of the promise now works.
   now runs `.venv/bin/python -m protect_context mcp` against `src`; a stdio
   handshake against that exact entry lists 14 tools including `guard_brief`.
   The published entry needs re-approval, since the definition hash changed.
+- **A correction can carry the command that proves it still holds.** The store
+  could record what the owner corrected and never test whether the fix stuck, so
+  "am I closer next time" was unanswerable from evidence. `guard_note correction
+  "…" --check "npm run check"` (CLI `note --check`, same field on the MCP and pi
+  tools) stores one command per correction; the brief runs at most three, newest
+  first, each killed at five seconds, and prints
+  `- <journal id>: HONORED|VIOLATED|TIMEOUT · <command>`. Bounded by design:
+  corrections only, explicit flag only, output discarded, and
+  `brief_checks: false` (or `brief_check_max: 0`) turns execution off while still
+  printing the reason — a disabled check is never silently absent. This is the
+  one read surface that executes store content, so the store being committed
+  matters: see the SPEC amendment.
 - **`PC diff · error: fatal: …` no longer doubles the prefix.**
 
 - **One brief, three surfaces, byte-identical.** `buildBrief` moved out of

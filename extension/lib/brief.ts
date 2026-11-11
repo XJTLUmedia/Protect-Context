@@ -43,6 +43,12 @@ export interface BriefInput {
    *  A row without the `agent` tag is the owner's own; an agent-tagged row is
    *  labelled unverified so it never reads as owner authority. */
   ownerIntent?: Array<{ type: string; text: string; tags: string[] }>;
+  /** Correction checks, already executed by the caller (brief_source runs
+   *  them): the renderer stays pure so both runtimes can be compared
+   *  byte-for-byte on identical input. */
+  checks?: Array<{ id: string; cmd: string; status: string }>;
+  /** Config `brief_checks` was false: print the commands instead of running them. */
+  checksDisabled?: boolean;
   loops: LoopInfo[];
   /** `label` is required: a masked exit 0 must never render like a clean one. */
   lastEvidence: {
@@ -65,6 +71,8 @@ export const BRIEF_MAX_OWNER_CONSTRAINT_LINES = 6;
 export const BRIEF_MAX_DECISIONS = 3;
 export const BRIEF_MAX_CORRECTIONS = 3;
 export const BRIEF_MAX_AGENT_NOTES = 2;
+/** Correction checks rendered per brief (mirrors brief.BRIEF_MAX_CHECKS). */
+export const BRIEF_MAX_CHECKS = 3;
 export const BRIEF_MAX_LOOPS = 2;
 /** Trusted tag matches injected when the owner task names a journal tag the caps hid. */
 export const BRIEF_MAX_RECALL = 2;
@@ -405,6 +413,19 @@ export function buildBrief(input: BriefInput): string {
       lines.push(`- ${kind}: ${shown}${tags}`);
     }
   }
+  const checks = input.checks ?? [];
+  if (checks.length > 0) {
+    lines.push("checks:");
+    for (const check of checks.slice(0, BRIEF_MAX_CHECKS)) {
+      lines.push(
+        `- ${truncLine(check.id, 40) || "(no id)"}: ${truncLine(check.status, 16)} · ${truncLine(check.cmd, CMD_DISPLAY_MAX)}`,
+      );
+    }
+  } else if (input.checksDisabled) {
+    // Silent disabling would make an unproved correction look checked.
+    lines.push("checks: not run (brief_checks=false) — commands are in guard_journal");
+  }
+
   if (input.loops.length > 0) {
     lines.push("loops:");
     for (const l of input.loops.slice(0, BRIEF_MAX_LOOPS)) {

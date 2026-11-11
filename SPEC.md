@@ -127,15 +127,42 @@ built-in defaults  <  ~/.config/protect-context/  <  .agent-guard/
 ```json
 {
   "loop_block_after": 3,
+  "loop_reset_after_s": 300,
   "diff_warn_lines": 400,
   "diff_hard_lines": 800,
   "diff_warn_files": 10,
   "ctx_warn_pct": 70,
   "brief_mode": "changed",
+  "brief_max_precedents": 3,
+  "brief_checks": true,
+  "brief_check_max": 3,
+  "brief_check_timeout_s": 5,
   "risk_confirm": true,
   "preflight_tools": ["git", "python3", "pip", "node", "npm", "rg", "pytest"]
 }
 ```
+
+### Amendment 2026-11-11 — correction checks
+
+The owner asked whether feedback actually changes behaviour next session; the
+store could record a correction but never test it. A **correction** may now
+carry one shell command that proves the rule still holds
+(`guard_note correction "…" --check "npm run check"`, CLI `note --check`, MCP/pi
+`guard_note` param `check`, ≤200 chars, one line). The brief runs at most
+`brief_check_max` of them (newest first) at session start and prints
+`- <journal id>: HONORED|VIOLATED|TIMEOUT · <command>` — the id is citable, and
+the command is always shown, so a check never runs invisibly.
+
+This is the one place a *read* surface executes store content, and the store is
+committed to the repository, so the limits are explicit rather than implied:
+only `correction` rows, only checks written through the explicit flag, at most
+`brief_check_max`, each killed at `brief_check_timeout_s`, with stdin and both
+streams discarded (a proving command answers with its exit code, not its log).
+`brief_checks: false` (or `brief_check_max: 0`) stops execution and the brief
+says `checks: not run (brief_checks=false)` — a disabled check is never silently
+absent. `shell=True` is by design, exactly as in `guard_verify` (SPEC §4): the
+command runs verbatim with the caller's own privileges. An owner who does not
+want store content executed must set `brief_checks: false`.
 
 ## 3. Python package `src/protect_context/`
 

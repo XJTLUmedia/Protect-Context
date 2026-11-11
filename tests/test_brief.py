@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from protect_context import brief, store
+from protect_context import brief, journal, store
 from protect_context.defaults import DEFAULT_CONTRACT
 
 SESSION = "test-session"
@@ -243,3 +243,30 @@ def test_python_brief_announces_contract_overflow(tmp_path):
     # Every seed still survives: the owner budget is additive.
     for seed in DEFAULT_CONTRACT:
         assert f"{seed['id']}:" in rendered
+
+
+def test_a_correction_check_runs_and_is_labelled():
+    entry = journal.add("correction", "split changes over 400 lines", check="true")
+    rendered = brief.compose_brief()
+    assert "checks:" in rendered
+    assert f"- {entry['id']}: HONORED · true" in rendered
+
+
+def test_a_violated_check_says_violated_not_honored():
+    journal.add("correction", "npm publish belongs to the owner", check="false")
+    rendered = brief.compose_brief()
+    assert "VIOLATED · false" in rendered
+    assert "HONORED" not in rendered
+
+
+def test_checks_disabled_prints_the_command_instead_of_running_it():
+    journal.add("correction", "split changes over 400 lines", check="true")
+    cfg = {**store.DEFAULT_CONFIG, "brief_checks": False}
+    rendered = brief.compose_brief(cfg)
+    # Silent disabling would make an unproved correction read as checked.
+    assert "checks: not run (brief_checks=false)" in rendered
+    assert "HONORED" not in rendered
+
+    capped = {**store.DEFAULT_CONFIG, "brief_check_max": 0}
+    capped_rendered = brief.compose_brief(capped)
+    assert "checks: not run (brief_checks=false)" in capped_rendered

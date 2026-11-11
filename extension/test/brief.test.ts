@@ -588,3 +588,31 @@ test("brief: an owner row hidden behind the precedent cap is still injected", ()
   assert.match(brief, /^owner intent:$/m);
   assert.match(brief, /^- use the vendor folder$/m);
 });
+
+test("brief: a correction check renders with its label and command (mirrors Python)", () => {
+  // The runner lives in brief_source.collectChecks; the renderer stays pure so
+  // both runtimes can be compared on identical input. Python renders exactly
+  // "- <id>: HONORED · true" for the same data (tests/test_brief.py).
+  const rendered = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+    checks: [{ id: "jn-0042", cmd: "npm run check", status: "HONORED" }],
+  });
+  assert.match(rendered, /^checks:$/m);
+  assert.match(rendered, /^- jn-0042: HONORED · npm run check$/m);
+});
+
+test("brief: disabled checks print the reason, not a silent absence", () => {
+  const rendered = buildBrief({
+    contract: DEFAULT_CONTRACT.constraints,
+    corrections: [],
+    loops: [],
+    lastEvidence: null,
+    checks: [],
+    checksDisabled: true,
+  });
+  assert.match(rendered, /^checks: not run \(brief_checks=false\)/m);
+  assert.doesNotMatch(rendered, /HONORED/);
+});
