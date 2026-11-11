@@ -640,3 +640,80 @@ def test_a_search_never_answers_itself():
         "recall.py", journal_rows=[], evidence_rows=[], event_rows=events
     ).hits
     assert [h.cmd for h in file_hits] == ["src/protect_context/recall.py"]
+
+
+def test_a_chinese_query_reaches_the_english_row_with_the_same_rule():
+    """The measured cross-lingual gap: no shared characters, so no hit.
+
+    SPEC excludes embeddings, so the bridge is the curated dictionary in
+    ``glossary.py``, applied at query time. 生产库 expands to "production
+    database"/"production", and the English row is reachable without changing
+    what is stored. A literal row of the same rarity must still rank first: the
+    translated term is scaled to 0.6.
+    """
+    english = {
+        "ts": "t1",
+        "type": "correction",
+        "text": "Never run destructive SQL on the production database.",
+        "tags": [],
+    }
+    chinese = {
+        "ts": "t2",
+        "type": "correction",
+        "text": "永远不要在生产库上执行破坏性 SQL 迁移",
+        "tags": [],
+    }
+    rows = [english, chinese]
+
+    zh_hits = recall.search(
+        "生产库", journal_rows=rows, evidence_rows=[], include_commands=False
+    ).hits
+    assert [hit.text for hit in zh_hits] == [chinese["text"], english["text"]]
+
+    en_hits = recall.search(
+        "production database", journal_rows=rows, evidence_rows=[], include_commands=False
+    ).hits
+    assert [hit.text for hit in en_hits] == [english["text"], chinese["text"]]
+
+    # One term is enough for the other language too.
+    assert [hit.text for hit in recall.search(
+        "破坏性", journal_rows=rows, evidence_rows=[], include_commands=False
+    ).hits] == [chinese["text"], english["text"]]
+    assert english["text"] in [
+        hit.text
+        for hit in recall.search(
+            "destructive", journal_rows=rows, evidence_rows=[], include_commands=False
+        ).hits
+    ]
+
+
+def test_the_bilingual_bridge_is_one_hop_and_bounded():
+    """A dictionary is not a translation model: unknown pairs still miss.
+
+    Honesty matters more than reach here. The table bridges only the terms it
+    lists; a paraphrase outside it behaves exactly as before (no hit), and a
+    keyword never matches a row through a chain of two translations.
+    """
+    rows = [{"ts": "t1", "type": "note", "text": "Ship the release on Friday.", "tags": []}]
+    # "发布" is in the table ("release"), "上线" (a common synonym) is not.
+    assert recall.search("上线", journal_rows=rows, evidence_rows=[]).matched == 0
+    assert recall.search("发布", journal_rows=rows, evidence_rows=[]).matched == 1
+    # The ASCII mid-word guard is untouched by the bridge.
+    assert recall.word_hit("表格old", "old") is False
+
+
+def test_the_glossary_mirrors_the_typescript_table():
+    """Two hand-maintained lists drift silently; this pins them to each other."""
+    from pathlib import Path
+
+    from protect_context import glossary
+
+    source = (Path(__file__).resolve().parents[1] / "extension/lib/glossary.ts").read_text()
+    pairs = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith('["'):
+            continue
+        english, chinese = stripped.rstrip(",").strip("[]").split('", "')
+        pairs.append((english.lstrip('"'), chinese.rstrip('"')))
+    assert tuple(pairs) == glossary.PAIRS

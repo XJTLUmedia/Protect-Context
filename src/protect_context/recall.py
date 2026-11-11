@@ -31,6 +31,12 @@ recorded reuse count. The displayed page collapses near-duplicates
 ``agent`` stay unverified; every other journal hit and every evidence row is
 trusted.
 
+A keyword also matches through the curated English/中文 table in ``glossary``:
+``生产库`` reaches a row saying "production database", and ``deploy`` reaches
+``部署``. That is a dictionary lookup applied to the query, not a model and not
+a change to what is stored; a bridged hit is scaled by
+``TRANSLATION_WEIGHT_MILLI`` so a literal row of the same rarity wins.
+
 Keep the weights, constants, and filter rules aligned with
 ``extension/lib/recall.ts``.
 """
@@ -42,7 +48,7 @@ import re
 
 from cachetools import LRUCache
 
-from . import dedup, store
+from . import dedup, glossary, store
 from . import stem as stemmer
 
 RECALL_TYPES = ("decision", "correction", "risk", "note", "evidence")
@@ -66,6 +72,13 @@ CMD_SUB_WEIGHT = 1
 # dates of each reuse, so there is no history to decay.
 USES_BONUS_STEP = 10
 USES_BONUS_CAP = 8
+
+# A keyword that reaches a row only through the bilingual glossary
+# (``glossary.py``) is a weaker signal than a literal one: the dictionary is
+# curated, but it is still an inference. The term is scaled by 0.6 so a literal
+# row always outranks an equally rare translated one, and it can still beat an
+# unrelated row. Integer arithmetic keeps the TypeScript mirror identical.
+TRANSLATION_WEIGHT_MILLI = 600
 
 # BM25 saturation (k1) and length normalisation (b), in thousandths so the
 # arithmetic stays integer and the TypeScript mirror agrees to the unit.
@@ -571,10 +584,39 @@ def _doc_length(row: dict) -> int:
     return total
 
 
+def _group_hit(
+    keyword: str,
+    keyword_stem: str,
+    canonical: str | None,
+    alternates: tuple[str, ...],
+    alternate_stems: tuple[str, ...],
+    row: dict,
+) -> tuple[int, bool]:
+    """Best hit for one query term, and whether it came from the glossary.
+
+    The literal keyword is tried first so a row that contains it is never
+    downgraded by a neighbour that also happens to be in the glossary. The
+    alternates are the bilingual counterparts (``glossary.translations``); they
+    are alternatives for the same term, not extra required terms, so the query
+    keeps its AND-over-terms shape.
+    """
+    raw = _raw_hit(keyword, keyword_stem, canonical, row)
+    if raw:
+        return raw, False
+    best = 0
+    for alternate, alternate_stem in zip(alternates, alternate_stems, strict=True):
+        candidate = _raw_hit(alternate, alternate_stem, None, row)
+        if candidate > best:
+            best = candidate
+    return best, best > 0
+
+
 def _keyword_score(
     keywords: list[str],
     kw_stems: list[str],
     canon_ids: list[str | None],
+    alternates: list[tuple[str, ...]],
+    alternate_stems: list[tuple[str, ...]],
     row: dict,
     idf: list[int],
     length: int,
@@ -588,6 +630,10 @@ def _keyword_score(
     most of it. The floor keeps precision: a three-or-more-word query must share
     at least two words. ``floor`` overrides that rule for the widening pass, where
     a single shared term is all the query has left.
+
+    A hit reached only through the bilingual glossary is scaled by
+    ``TRANSLATION_WEIGHT_MILLI``: it is evidence, but a literal row of the same
+    rarity must win.
     """
     if not keywords:
         return 0
@@ -595,13 +641,25 @@ def _keyword_score(
     hits = 0
     tag_hit = False
     for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
-        raw = _raw_hit(keyword, kw_stems[index], canonical, row)
+        raw, translated = _group_hit(
+            keyword,
+            kw_stems[index],
+            canonical,
+            alternates[index],
+            alternate_stems[index],
+            row,
+        )
         if not raw:
             continue
         hits += 1
-        if any(term_hit(tag, keyword, kw_stems[index]) for tag in row["tags"]):
+        if any(term_hit(tag, keyword, kw_stems[index]) for tag in row["tags"]) or any(
+            term_hit(tag, alternate, stem)
+            for tag in row["tags"]
+            for alternate, stem in zip(alternates[index], alternate_stems[index], strict=True)
+        ):
             tag_hit = True
-        score += _bm25_term(idf[index], raw, length, average)
+        term = _bm25_term(idf[index], raw, length, average)
+        score += (term * TRANSLATION_WEIGHT_MILLI) // 1000 if translated else term
     if floor is None:
         floor = 1 if len(keywords) < _MULTI_MATCH_FROM else _MULTI_MATCH_FLOOR
     # A tag is a synonym the owner wrote on purpose, so one tag match is a
@@ -614,7 +672,13 @@ def _keyword_score(
 def _document_frequencies(
     keywords: list[str], kw_stems: list[str], canon_ids: list[str | None], corpus: list[dict]
 ) -> list[int]:
-    """How many corpus rows each keyword reaches (the idf input)."""
+    """How many corpus rows each keyword reaches literally (the idf input).
+
+    Deliberately excludes the glossary alternates: idf should describe the query
+    term the owner typed, and letting a bridge inflate df would lower the score
+    of every literal row that already matched. A bridged hit reuses the idf of
+    its own keyword, so the ranking of an all-English store is unchanged.
+    """
     counts = [0] * len(keywords)
     for row in corpus:
         for index, (keyword, canonical) in enumerate(zip(keywords, canon_ids, strict=True)):
@@ -743,6 +807,10 @@ def search(
     bounded = bounded_limit(limit)
     keywords = _keywords(query)
     kw_stems = [stemmer.stem(keyword) for keyword in keywords]
+    alternates = [glossary.translations(keyword) for keyword in keywords]
+    alternate_stems = [
+        tuple(stemmer.stem(alternate) for alternate in group) for group in alternates
+    ]
     canon_ids = _canonical_keys(keywords)
     wanted_tags = _requested_tags(tags)
     cmd_filter = _blank_to_none(cmd)
@@ -807,7 +875,16 @@ def search(
             if bonus is None:
                 continue
             keyword_score = _keyword_score(
-                keywords, kw_stems, canon_ids, row, idf, lengths[seq], average, floor
+                keywords,
+                kw_stems,
+                canon_ids,
+                alternates,
+                alternate_stems,
+                row,
+                idf,
+                lengths[seq],
+                average,
+                floor,
             )
             if keyword_score is None:
                 continue
