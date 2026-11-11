@@ -85,7 +85,7 @@
     "01a1c8f1-f885-7003-bb87-bab6344e43b0": {
       "started": "2026-11-11T04:51:07.795Z",
       "git_head": "a75f65eb30bd3959af0f6a2d18cdc7b002904e99",
-      "brief_digest": "d54493ea9cb152e951bd9a69984db49db41c4d17",
+      "brief_digest": "b30121c03538a5120c7ee84a2cb32e21eb6829f5",
       "notify_watermarks": {
         "ctx_pct": 0,
         "diff_lines": 800,
@@ -95,12 +95,20 @@
     }
   },
   "counters": {
-    "orient_sha1": "3a6f40a32229f2d93a705f819fb97c77b97bc7e9",
-    "journal_seq": 89
+    "orient_sha1": "3a6f40a32229f2d93a705f819fb97c77b97bc7e9"
   },
   "task": {
-    "text": "fix everything you have found",
+    "text": "I saw glossary ts is way too limited on certain words, can you please leverage open sourced language pack for npm to use all necessary words?",
     "source": "prompt",
-    "ts": "2026-11-11T06:00:14.117Z"
+    "ts": "2026-11-11T06:23:49.957Z",
+    "session": "01a1c8f1-f885-7003-bb87-bab6344e43b0",
+    "files": [
+      "/home/futuresight/python-projects/protect-context/scripts/build_lexicon.mjs",
+      "/home/futuresight/python-projects/protect-context/src/protect_context/glossary.py",
+      "/home/futuresight/python-projects/protect-context/extension/lib/glossary.ts",
+      "/home/futuresight/python-projects/protect-context/NOTICE",
+      "/home/futuresight/python-projects/protect-context/README.md",
+      "/home/futuresight/python-projects/protect-context/SPEC.md"
+    ]
   }
 }
