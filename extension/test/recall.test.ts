@@ -504,3 +504,32 @@ test("recall: a case-variant Agent tag stays unverified", () => {
   assert.equal(hit?.provenance, "agent", "a stored `Agent` tag is not owner authority");
   assert.deepEqual(trustedRecallPool([{ ts: "t", type: "note", text: "x", tags: ["Agent"] }]), []);
 });
+
+test("recall: a 中文 keyword matches inside an unsegmented run (mirrors Python)", () => {
+  // CJK has no word starts: the boundary rule hid every 中文 match (measured
+  // 2026-11-11, 生产库 found nothing in 在生产库上). ASCII keeps the strict rule.
+  const row = "永远不要在生产库上执行破坏性 SQL 迁移";
+  assert.equal(wordHit(row, "生产库"), true);
+  assert.equal(wordHit(row, "破坏性"), true);
+  assert.equal(wordHit(row, "生产表"), false);
+  assert.equal(wordHit("表格old", "old"), false);
+
+  const rows = [{ ts: "1", type: "correction", text: row, tags: [] }];
+  const result = searchRows(rows, [], { query: "生产库" });
+  assert.deepEqual(result.hits.map((hit) => hit.text), [row]);
+});
+
+test("recall: a search never answers itself", () => {
+  // The store records the query a search ran; that echo is not knowledge.
+  // On the real store a 中文 query returned four rows, all of them the
+  // commands that ran that query.
+  const events = [
+    { ts: "t1", kind: "tool_result", session: "s", tool: "guard_recall", cmd: "拆分改动 400 行", ok: true },
+    { ts: "t2", kind: "tool_result", session: "s", tool: "mcp__protect_context__guard_recall", cmd: "拆分改动", ok: true },
+    { ts: "t3", kind: "tool_result", session: "s", tool: "read", cmd: "src/protect_context/recall.py", ok: true },
+  ];
+  assert.deepEqual(searchRows([], [], { query: "拆分改动" }, events).hits, []);
+  // Non-query hints still index: the fix must not blind the reuse ledger.
+  const fileHits = searchRows([], [], { query: "recall.py" }, events).hits;
+  assert.deepEqual(fileHits.map((hit) => hit.cmd), ["src/protect_context/recall.py"]);
+});

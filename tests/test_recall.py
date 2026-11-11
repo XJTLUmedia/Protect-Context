@@ -575,3 +575,68 @@ def test_stemming_does_not_reintroduce_mid_word_noise():
     ]
     assert recall.search("old", journal_rows=rows, evidence_rows=[]).matched == 0
     assert recall.search("arch", journal_rows=rows, evidence_rows=[]).matched == 0
+
+
+def test_a_chinese_keyword_matches_inside_an_unsegmented_run():
+    """CJK has no word starts, so the boundary rule hid every 中文 match.
+
+    Measured 2026-11-11: a query for 生产库 returned 0 hits against a row that
+    literally contains 在生产库上, because the character before the match is a
+    letter. Substring is the correct unit for a script with no spaces; the
+    mid-word noise the boundary rule stops ("arch" in "search") needs an ASCII
+    word structure Chinese does not have.
+    """
+    row = "永远不要在生产库上执行破坏性 SQL 迁移"
+    assert recall.word_hit(row, "生产库")
+    assert recall.word_hit(row, "破坏性")
+    assert not recall.word_hit(row, "生产表")
+
+    rows = [{"ts": "1", "type": "correction", "text": row, "tags": []}]
+    hits = recall.search("生产库", journal_rows=rows, evidence_rows=[]).hits
+    assert [h.text for h in hits] == [row]
+
+    # ASCII keeps the strict rule: a 中文 neighbour does not license a mid-word hit.
+    assert not recall.word_hit("表格old", "old")
+
+
+def test_a_search_never_answers_itself():
+    """The store records the query a search ran; that echo is not knowledge.
+
+    Measured 2026-11-11 on the real store: a 中文 query returned four rows and
+    every one of them was a command that ran that same query, so the search
+    looked like it had found something when the store held nothing at all.
+    """
+    events = [
+        {
+            "kind": "tool_result",
+            "session": "s",
+            "tool": "guard_recall",
+            "cmd": "拆分改动 400 行",
+            "ok": True,
+            "ts": "2026-11-11T02:00:00Z",
+        },
+        {
+            "kind": "tool_result",
+            "session": "s",
+            # MCP clients qualify the name; the last segment is the real tool.
+            "tool": "mcp__protect_context__guard_recall",
+            "cmd": "拆分改动",
+            "ok": True,
+            "ts": "2026-11-11T02:01:00Z",
+        },
+        {
+            "kind": "tool_result",
+            "session": "s",
+            "tool": "read",
+            "cmd": "src/protect_context/recall.py",
+            "ok": True,
+            "ts": "2026-11-11T02:02:00Z",
+        },
+    ]
+    result = recall.search("拆分改动", journal_rows=[], evidence_rows=[], event_rows=events)
+    assert [h.text for h in result.hits] == []
+    # Non-query hints still index: the fix must not blind the reuse ledger.
+    file_hits = recall.search(
+        "recall.py", journal_rows=[], evidence_rows=[], event_rows=events
+    ).hits
+    assert [h.cmd for h in file_hits] == ["src/protect_context/recall.py"]

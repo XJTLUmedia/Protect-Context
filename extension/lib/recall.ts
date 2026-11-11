@@ -118,6 +118,11 @@ export interface RecallResult {
 
 /** Tools whose rows are shell runs; every other tool leaves a reuse key. */
 const SHELL_TOOLS = new Set(["bash", "guard_verify"]);
+/** Search tools record the *query* they ran, so indexing their rows let a query
+ *  answer itself: for any wording the store had not seen before, the echo of
+ *  the search was rank 1 and carried no knowledge (mirrors recall.py;
+ *  QUERY_TOOLS, measured 2026-11-11). */
+const QUERY_TOOLS = new Set(["guard_recall"]);
 
 interface CorpusRow {
   source: "journal" | "evidence" | "command" | "file";
@@ -307,6 +312,9 @@ function fileRows(events: unknown[]): CorpusRow[] {
     if (record.kind !== "tool_result") continue;
     const tool = typeof record.tool === "string" ? record.tool : "";
     if (tool === "" || SHELL_TOOLS.has(tool)) continue;
+    // MCP clients qualify the name (mcp__server__guard_recall); the last
+    // segment is the tool the store actually recorded.
+    if (QUERY_TOOLS.has(tool.split("__").at(-1) ?? tool)) continue;
     if (typeof record.cmd !== "string" || record.cmd.trim() === "") continue;
     const key = normalizeCommand(record.cmd);
     if (key === "") continue;
@@ -444,6 +452,11 @@ function commandRows(events: unknown[]): CorpusRow[] {
 export function wordHit(haystack: string, keyword: string): boolean {
   if (keyword === "") return false;
   const folded = haystack.toLowerCase();
+  // A non-ASCII keyword is a substring match: scripts written without spaces
+  // have no word start to find, and the mid-word noise the boundary rule stops
+  // ("arch" in "search") needs an ASCII word structure Chinese does not have.
+  // Mirrors recall.word_hit (measured 2026-11-11).
+  if (/[^\x00-\x7F]/.test(keyword)) return folded.includes(keyword.toLowerCase());
   let start = 0;
   for (;;) {
     const idx = folded.indexOf(keyword, start);

@@ -295,6 +295,12 @@ def _as_evidence(row: dict) -> dict | None:
 # Tools whose rows are shell runs; every other tool leaves a "reuse key" that
 # points at the file or pattern it touched.
 SHELL_TOOLS = frozenset(("bash", "guard_verify"))
+# Search tools record the *query* they ran, so indexing their rows let a query
+# answer itself: for any wording the store had not seen before, the echo of the
+# search itself was rank 1 and carried no knowledge at all (measured 2026-11-11:
+# a 中文 query returned 4 rows and every one was a command that ran that query).
+# A reuse hint must point at content, not at a question.
+QUERY_TOOLS = frozenset(("guard_recall",))
 
 
 def _file_rows(events: list[dict]) -> list[dict]:
@@ -310,6 +316,10 @@ def _file_rows(events: list[dict]) -> list[dict]:
             continue
         tool = row.get("tool")
         if not isinstance(tool, str) or not tool or tool in SHELL_TOOLS:
+            continue
+        # MCP clients qualify the name (mcp__server__guard_recall); the last
+        # segment is the tool the store actually recorded.
+        if tool.rsplit("__", 1)[-1] in QUERY_TOOLS:
             continue
         key = row.get("cmd")
         if not isinstance(key, str) or not key.strip():
@@ -470,10 +480,20 @@ def word_hit(haystack: str, keyword: str) -> bool:
     "search", so a query could answer itself with the wrong entry. Matching only
     at a word start keeps the useful morphology ("patch" -> "patches") while
     dropping the mid-word noise.
+
+    A non-ASCII keyword is matched as a substring instead. Scripts written
+    without spaces have no word start to find: in "…在生产库上…" every neighbour
+    of a CJK match is a letter, so the boundary rule rejected every query that
+    was not the whole unsegmented run (measured 2026-11-11: 生产库 found nothing
+    in a row that literally contains it). The mid-word noise this rule exists
+    to stop — "arch" inside "search" — needs an ASCII word structure that
+    Chinese does not have.
     """
     if not keyword:
         return False
     haystack = haystack.casefold()
+    if not keyword.isascii():
+        return keyword.casefold() in haystack
     start = 0
     while True:
         idx = haystack.find(keyword, start)
