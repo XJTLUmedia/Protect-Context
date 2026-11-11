@@ -26,6 +26,24 @@ npm run typecheck
 
 `npm run check` is the typecheck and the extension tests together. `npm test` runs `node --experimental-strip-types --test extension/test/*.test.ts`. Pytest uses a temporary working directory per test, so it does not write `.agent-guard/` into the checkout.
 
+## The English/中文 term bridge
+
+`src/protect_context/lexicon.tsv` is generated, not hand-edited, and both
+runtimes read it (`glossary.py`, `glossary.ts`). Two tiers live in one file: the
+curated pairs come first and win, then the dictionary.
+
+To add a domain word, edit `data/curated.tsv` and regenerate:
+
+```sh
+npm install        # brings cc-cedict, a build-time dependency only
+node scripts/build_lexicon.mjs          # rewrite src/protect_context/lexicon.tsv
+node scripts/build_lexicon.mjs --check  # what the test suite verifies
+```
+
+Do not edit `lexicon.tsv` directly — `--check` fails on a hand edit, and
+`tests/test_recall.py` runs both loaders against the same file. The dictionary
+section is derived from CC-CEDICT and stays CC BY-SA 4.0; see `NOTICE`.
+
 The loop-brake script is separate from pytest. From the repository root:
 
 ```sh

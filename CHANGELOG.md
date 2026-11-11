@@ -22,8 +22,15 @@ Mandarin half of the promise now works.
   previous release could match 中文 inside a Chinese row and nothing else, so
   `生产库` still missed "never run destructive SQL on the production database":
   no shared characters. Learned cross-lingual paraphrase needs an embedding
-  model, which SPEC excludes, so this is the deterministic half — a curated
-  English/中文 term table (`glossary.py` / `glossary.ts`) applied at query time.
+  model, which SPEC excludes, so this is the deterministic half — a term table
+  applied at query time, in two tiers: 59 curated pairs for the vocabulary this
+  tool records, then ~64k pairs derived from CC-CEDICT (the `cc-cedict` npm
+  package, build-time only) so ordinary words bridge too — `deadlock` ↔ 死锁,
+  `firewall` ↔ 防火墙, `thread` ↔ 线程, `gateway` ↔ 网关, `cache` → 高速缓存. The
+  table is generated into `src/protect_context/lexicon.tsv` by
+  `node scripts/build_lexicon.mjs` and read by both runtimes, so Python and
+  TypeScript cannot drift; the dictionary section is CC BY-SA 4.0 and ships with
+  its attribution in `NOTICE`.
   A term is expanded to its counterparts and a row may match any of them;
   nothing is translated on write, so the stored format and every existing store
   are unchanged. A hit reached only through the table is scaled to 0.6, so a
