@@ -93,14 +93,18 @@ _AGENT_TAG = "agent"
 # reaches the entry that answers it instead of dying on AND("the", "did").
 _STOPWORDS = frozenset(
     (
-        "a an and any are as at be been before being but by can could did do does"
-        " doing done for from get gets got had has have how i if in into is it"
-        " its just me more"
-        " most my no not now of on once only or other our out over own same she"
-        " should so some such than that the their them then there these they this"
-        " those through to too under until up very was we were what when where"
-        " which while who whom why will with would you your"
-    ).split()
+        "a", "an", "and", "any", "are", "as", "at", "be", "been", "before",
+        "being", "but", "by", "can", "could", "did", "do", "does", "doing",
+        "done", "for", "from", "get", "gets", "got", "had", "has", "have",
+        "how", "i", "if", "in", "into", "is", "it", "its", "just", "me", "more",
+        "most", "my", "no", "not", "now", "of", "on", "once", "only", "or",
+        "other", "our", "out", "over", "own", "same", "she", "should", "so",
+        "some", "such", "than", "that", "the", "their", "them", "then", "there",
+        "these", "they", "this", "those", "through", "to", "too", "under",
+        "until", "up", "very", "was", "we", "were", "what", "when", "where",
+        "which", "while", "who", "whom", "why", "will", "with", "would", "you",
+        "your"
+    )
 )
 # A longer query must share more than one word, or every entry that mentions
 # "owner" would match a five-word question.
