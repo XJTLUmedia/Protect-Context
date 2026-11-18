@@ -5,7 +5,7 @@
       "args": ["-m", "protect_context", "mcp"],
       "cwd": ".",
       "env": { "PYTHONPATH": "src" },
-      "description": "protect-context guard tools from THIS checkout (14 tools). Not the published wheel: `uvx protect-context mcp` runs PyPI 3.3.1, which is also the version in this tree but an OLDER surface (13 tools, no guard_brief). Point users at uvx, never at uvx for testing unreleased work."
+      "description": "protect-context guard tools from THIS checkout (14 tools). Not the published wheel: `uvx protect-context mcp` runs PyPI 3.3.1, an OLDER surface than this tree (13 tools, no guard_brief). Point users at uvx, never at uvx for testing unreleased work."
     }
   }
 }

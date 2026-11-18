@@ -12,7 +12,7 @@ uv pip install -e ".[dev]"
 npm ci --ignore-scripts
 ```
 
-`uv pip install -e ".[dev]"` installs this checkout plus `pytest` and `build`, which are the `dev` extra in `pyproject.toml`. There is no `uv.lock`. The extension's npm dependencies are devDependencies; the published extension has zero runtime dependencies.
+`uv pip install -e ".[dev]"` installs this checkout plus `pytest` and `build`, which are the `dev` extra in `pyproject.toml`. There is no `uv.lock`. The pi host modules and the build toolchain are devDependencies; the packages the extension and `bin/pc.mjs` import are `dependencies` in `package.json` and install with the published package.
 
 If the default `node` is older than 22.19, the README's `npx -y node@22 …` commands run the same checks without changing the system Node.
 
@@ -37,11 +37,16 @@ To add a domain word, edit `data/curated.tsv` and regenerate:
 ```sh
 npm install        # brings cc-cedict, a build-time dependency only
 node scripts/build_lexicon.mjs          # rewrite src/protect_context/lexicon.tsv
-node scripts/build_lexicon.mjs --check  # what the test suite verifies
+node scripts/build_lexicon.mjs --check  # compare the committed file with a fresh build
 ```
 
-Do not edit `lexicon.tsv` directly — `--check` fails on a hand edit, and
-`tests/test_recall.py` runs both loaders against the same file. The dictionary
+Do not edit `lexicon.tsv` directly — `--check` fails when the curated tier
+differs from `data/curated.tsv`, and `tests/test_recall.py` pins that tier and
+runs both loaders against the same file. The dictionary tier depends on the
+CC-CEDICT snapshot that `cc-cedict`'s postinstall downloads, which upstream
+republishes continuously, so `--check` reports a difference there without
+failing. `npm ci --ignore-scripts` skips that download and leaves the older
+snapshot bundled in the package; regenerate only after a plain `npm install`. The dictionary
 section is derived from CC-CEDICT and stays CC BY-SA 4.0; see `NOTICE`.
 
 The loop-brake script is separate from pytest. From the repository root:
