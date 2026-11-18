@@ -18,7 +18,6 @@ visible *before* they cost you a session.
   <a href="https://registry.modelcontextprotocol.io/"><img alt="MCP Registry" src="https://img.shields.io/badge/MCP%20Registry-io.github.XJTLUmedia%2Fprotect-context-blue"></a>
   <img alt="python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="enforcement: advisory-first" src="https://img.shields.io/badge/enforcement-advisory--first-lightgrey">
-  <img alt="runtime dependencies: zero" src="https://img.shields.io/badge/npm%20runtime%20deps-0-success">
 </p>
 
 <p align="center">
@@ -117,8 +116,8 @@ without turning the agent into a different agent.
 
 Python 3.10+ is required for the CLI and MCP server. Node 22.19+ is required
 only to validate the TypeScript extension from a checkout — pi supplies the
-extension's runtime modules, and the extension has **zero npm runtime
-dependencies**.
+extension's host modules and installs the npm dependencies the extension
+imports (`chalk`, `cosmiconfig`, `opossum`, `pino`) with the package.
 
 ### Install the pi extension
 
@@ -139,7 +138,7 @@ host modules (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`,
 installation for managed npm packages, while a plain `npm install
 protect-context` does not. The second path downloads the whole pi runtime and
 surfaces advisories from that tree, which belong to the host and not to this
-zero-runtime-dependency extension.
+extension.
 
 Remove any hand-installed copy first — a directory such as
 `~/.pi/agent/extensions/protect-context` or `.pi/extensions/protect-context`,
@@ -934,7 +933,7 @@ npm test                                     # extension unit tests (node --test
 
 `npm run check` runs the typecheck and the extension tests together. CI
 (`.github/workflows/check.yml`) runs the same suite plus pytest on Python 3.10
-and 3.12 for every push and pull request, so a green claim no longer depends on
+through 3.13 for every push and pull request, so a green claim no longer depends on
 the operator remembering to type the command. The
 definition-of-done checks are run twice consecutively before release. The dated
 audit records the observed counts, integration probes, and package smoke test

@@ -1,10 +1,32 @@
 # Changelog
 
-## Unreleased
+## 3.4.0
 
 The brief is no longer extension-only, the store travels with the repo, and the
 Mandarin half of the promise now works.
 
+- **Version 3.4.0 in every artifact.** npm 3.4.0 was published from a tree where
+  only `package.json` had moved; `pyproject.toml`, `__init__.py`, `server.json`,
+  `package-lock.json` (both places) and `bin/pc.mjs` still said 3.3.1, so
+  `test_one_version_everywhere` failed and `pc --version` disagreed with the
+  package it shipped in. PyPI and the MCP Registry are still 3.3.1.
+- **The Python CI job installs the extension's npm modules.** The cross-runtime
+  parity tests (`tests/test_brief.py`, `tests/test_recall.py`) run the
+  TypeScript through `node`, and `extension/lib/journal.ts` imports `pino`. The
+  runner image ships `node` but the job never ran `npm ci`, so every pytest job
+  failed with `ERR_MODULE_NOT_FOUND` from the commit that added the import. The
+  job now pins Node 22 and runs `npm ci --ignore-scripts`, and
+  `tests/test_registry.py` pins that prerequisite.
+- **`build_lexicon.mjs --check` no longer fails on upstream dictionary churn.**
+  `cc-cedict`'s postinstall downloads the current CC-CEDICT, which upstream
+  republishes continuously, so a fresh `npm install` made `--check` report the
+  committed `lexicon.tsv` stale with no change in this repository. The curated
+  tier still fails on any difference; a dictionary-tier difference is reported
+  with both pair counts and exits 0.
+- **Docs match the package.** README and CONTRIBUTING said the extension has
+  zero npm runtime dependencies; `package.json` declares the modules the
+  extension and `bin/pc.mjs` import as `dependencies`. README said CI runs
+  Python 3.10 and 3.12; the matrix is 3.10 through 3.13.
 - **The search no longer answers its own question.** The same rule that covered a
   `guard_recall` tool row now covers the shell: a command that talks to this
   project's own recall surface, and a `guard_verify` row whose stored command is

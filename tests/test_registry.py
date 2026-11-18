@@ -139,6 +139,12 @@ def test_check_workflow_runs_both_suites_and_their_prerequisites():
     assert '"3.10", "3.11", "3.12", "3.13"' in text, "python matrix matches the classifiers"
     # Prerequisites for the extension job's cross-runtime tests.
     assert "pip install -e ." in text, "cross-runtime tests import the package"
+    # ...and for the Python job's: the parity tests run extension/lib through
+    # `node`, which imports npm modules, so pytest needs node_modules too.
+    python_job = text.split("\n  python:\n", 1)[1]
+    assert "actions/setup-node@" in python_job, "parity tests need a pinned node"
+    assert "npm ci" in python_job, "parity tests import the extension's npm modules"
+    assert python_job.index("npm ci") < python_job.index("pytest -q")
     assert "pull_request" in text and "push" in text
     # Supply-chain hardening: a movable action tag is an input to every run.
     for line in text.splitlines():

@@ -15,8 +15,13 @@
  * and it is also why the curated list stays in front: a dictionary gives 分所
  * for "branch" where this domain means 分支.
  *
- * `--check` regenerates in memory and fails if the committed file differs, which
- * is what the test suite runs.
+ * `--check` regenerates in memory and compares with the committed file. The
+ * curated tier is deterministic, so any difference there fails. The dictionary
+ * tier is not: `cc-cedict`'s postinstall downloads the current CC-CEDICT, which
+ * upstream republishes continuously (and `npm ci --ignore-scripts` leaves the
+ * older snapshot bundled in the package), so a difference there is reported
+ * with both pair counts and does not fail. The test suite does not run this
+ * script; `tests/test_recall.py` pins the curated tier against `curated.tsv`.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -158,6 +163,20 @@ function render() {
   return lines.join("\n") + "\n";
 }
 
+const DICTIONARY_MARK = "# --- dictionary";
+
+/** Split a rendered table into its curated and dictionary tiers, minus the header that counts both. */
+function tiers(table) {
+  const start = table.indexOf("# --- curated");
+  const split = table.indexOf(DICTIONARY_MARK);
+  if (start === -1 || split === -1) return [table, ""];
+  return [table.slice(start, split), table.slice(split)];
+}
+
+function pairCount(tier) {
+  return tier.split("\n").filter((line) => line !== "" && !line.startsWith("#")).length;
+}
+
 const text = render();
 if (process.argv.includes("--check")) {
   let current = "";
@@ -167,11 +186,21 @@ if (process.argv.includes("--check")) {
     console.error(`build_lexicon: ${OUT} is missing — run node scripts/build_lexicon.mjs`);
     process.exit(1);
   }
-  if (current !== text) {
+  const [currentCurated, currentDictionary] = tiers(current);
+  const [curated, dictionary] = tiers(text);
+  if (currentCurated !== curated) {
     console.error("build_lexicon: lexicon.tsv is stale — run node scripts/build_lexicon.mjs");
     process.exit(1);
   }
-  console.log("build_lexicon: lexicon.tsv is up to date");
+  if (currentDictionary !== dictionary) {
+    console.log(
+      `build_lexicon: curated tier is up to date; the dictionary tier differs from the installed CC-CEDICT snapshot ` +
+        `(committed ${pairCount(currentDictionary)} pairs, installed ${pairCount(dictionary)}). ` +
+        "Upstream data moves, so this is not a failure — run node scripts/build_lexicon.mjs to refresh.",
+    );
+  } else {
+    console.log("build_lexicon: lexicon.tsv is up to date");
+  }
 } else {
   writeFileSync(OUT, text);
   const rows = text.split("\n").filter((line) => line !== "" && !line.startsWith("#")).length;
