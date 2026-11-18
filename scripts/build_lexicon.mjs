@@ -16,8 +16,9 @@
  * for "branch" where this domain means 分支.
  *
  * `--check` regenerates in memory and compares with the committed file. The
- * curated tier is deterministic, so any difference there fails. The dictionary
- * tier is not: `cc-cedict`'s postinstall downloads the current CC-CEDICT, which
+ * header, the curated tier and the tier headings are deterministic, so any
+ * difference there fails, as does a dictionary row that is not a plain
+ * `english<TAB>中文` pair. The dictionary rows themselves are not deterministic: `cc-cedict`'s postinstall downloads the current CC-CEDICT, which
  * upstream republishes continuously (and `npm ci --ignore-scripts` leaves the
  * older snapshot bundled in the package), so a difference there is reported
  * with both pair counts and does not fail. The test suite does not run this
@@ -163,23 +164,25 @@ function render() {
   return lines.join("\n") + "\n";
 }
 
+const DICTIONARY_HEADING = "\n# --- dictionary";
+const COUNT_LINE = /^(# curated: \d+ \| dictionary: )\d+$/m;
+// A dictionary row is `english<TAB>中文`: never a comment, a heading, a blank
+// line, or anything a loader could read as one after trimming.
+const DICTIONARY_ROW = /^[^#\s][^\t]*\t[^\t]*[^\t\s]$/u;
+
 /**
- * The curated and dictionary rows of a table, read the way both loaders read
- * it (`glossary.py`, `glossary.ts`): a tier heading anywhere switches the tier
- * for the rows after it, so a row a loader would treat as curated is compared
- * as curated wherever it sits in the file.
+ * Split a table into everything this repository determines (the header, the
+ * curated tier, the dictionary heading) and the dictionary rows, which follow
+ * the installed CC-CEDICT snapshot. Null when there is no dictionary heading.
  */
-function tiers(table) {
-  const curated = [];
-  const dictionary = [];
-  let bucket = null;
-  for (const raw of table.split("\n")) {
-    const line = raw.trim();
-    if (line.startsWith("# --- curated")) bucket = curated;
-    else if (line.startsWith("# --- dictionary")) bucket = dictionary;
-    else if (bucket !== null && line !== "" && !line.startsWith("#")) bucket.push(line);
-  }
-  return [curated, dictionary];
+function split(table) {
+  const at = table.indexOf(DICTIONARY_HEADING);
+  if (at === -1) return null;
+  const end = table.indexOf("\n", at + 1) + 1;
+  if (end === 0) return null;
+  const rows = table.slice(end).split("\n");
+  if (rows.pop() !== "") return null; // the file ends with a newline
+  return { head: table.slice(0, end), rows };
 }
 
 const text = render();
@@ -191,16 +194,19 @@ if (process.argv.includes("--check")) {
     console.error(`build_lexicon: ${OUT} is missing — run node scripts/build_lexicon.mjs`);
     process.exit(1);
   }
-  const [currentCurated, currentDictionary] = tiers(current);
-  const [curated, dictionary] = tiers(text);
-  if (currentCurated.join("\n") !== curated.join("\n")) {
+  const committed = split(current);
+  const built = split(text);
+  // Byte-exact on the deterministic part: only the dictionary row count in the
+  // header may follow the committed rows instead of the installed snapshot.
+  const expectedHead = built.head.replace(COUNT_LINE, `$1${committed?.rows.length}`);
+  if (committed === null || committed.head !== expectedHead || !committed.rows.every((row) => DICTIONARY_ROW.test(row))) {
     console.error("build_lexicon: lexicon.tsv is stale — run node scripts/build_lexicon.mjs");
     process.exit(1);
   }
-  if (current !== text) {
+  if (committed.rows.join("\n") !== built.rows.join("\n")) {
     console.log(
       `build_lexicon: curated tier is up to date; the dictionary tier differs from the installed CC-CEDICT snapshot ` +
-        `(committed ${currentDictionary.length} pairs, installed ${dictionary.length}). ` +
+        `(committed ${committed.rows.length} pairs, installed ${built.rows.length}). ` +
         "Upstream data moves, so this is not a failure — run node scripts/build_lexicon.mjs to refresh.",
     );
   } else {
