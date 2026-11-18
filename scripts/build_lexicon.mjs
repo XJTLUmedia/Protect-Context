@@ -163,18 +163,23 @@ function render() {
   return lines.join("\n") + "\n";
 }
 
-const DICTIONARY_MARK = "# --- dictionary";
-
-/** Split a rendered table into its curated and dictionary tiers, minus the header that counts both. */
+/**
+ * The curated and dictionary rows of a table, read the way both loaders read
+ * it (`glossary.py`, `glossary.ts`): a tier heading anywhere switches the tier
+ * for the rows after it, so a row a loader would treat as curated is compared
+ * as curated wherever it sits in the file.
+ */
 function tiers(table) {
-  const start = table.indexOf("# --- curated");
-  const split = table.indexOf(DICTIONARY_MARK);
-  if (start === -1 || split === -1) return [table, ""];
-  return [table.slice(start, split), table.slice(split)];
-}
-
-function pairCount(tier) {
-  return tier.split("\n").filter((line) => line !== "" && !line.startsWith("#")).length;
+  const curated = [];
+  const dictionary = [];
+  let bucket = null;
+  for (const raw of table.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("# --- curated")) bucket = curated;
+    else if (line.startsWith("# --- dictionary")) bucket = dictionary;
+    else if (bucket !== null && line !== "" && !line.startsWith("#")) bucket.push(line);
+  }
+  return [curated, dictionary];
 }
 
 const text = render();
@@ -188,14 +193,14 @@ if (process.argv.includes("--check")) {
   }
   const [currentCurated, currentDictionary] = tiers(current);
   const [curated, dictionary] = tiers(text);
-  if (currentCurated !== curated) {
+  if (currentCurated.join("\n") !== curated.join("\n")) {
     console.error("build_lexicon: lexicon.tsv is stale — run node scripts/build_lexicon.mjs");
     process.exit(1);
   }
-  if (currentDictionary !== dictionary) {
+  if (current !== text) {
     console.log(
       `build_lexicon: curated tier is up to date; the dictionary tier differs from the installed CC-CEDICT snapshot ` +
-        `(committed ${pairCount(currentDictionary)} pairs, installed ${pairCount(dictionary)}). ` +
+        `(committed ${currentDictionary.length} pairs, installed ${dictionary.length}). ` +
         "Upstream data moves, so this is not a failure — run node scripts/build_lexicon.mjs to refresh.",
     );
   } else {
