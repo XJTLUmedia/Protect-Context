@@ -8,6 +8,8 @@ visible *before* they cost you a session.
 
 <!-- mcp-name: io.github.XJTLUmedia/protect-context -->
 
+[![XJTLUmedia/Protect-Context MCP server](https://glama.ai/mcp/servers/XJTLUmedia/Protect-Context/badges/score.svg)](https://glama.ai/mcp/servers/XJTLUmedia/Protect-Context)
+
 <p align="center">
   <a href="https://pypi.org/project/protect-context/"><img alt="PyPI" src="https://img.shields.io/pypi/v/protect-context"></a>
   <a href="https://pepy.tech/project/protect-context"><img alt="PyPI downloads" src="https://img.shields.io/pepy/dt/protect-context"></a>
